@@ -1,4 +1,4 @@
-﻿// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 #pragma once
 
@@ -9,10 +9,11 @@
  * Also has a utility for redirecting those references (used for redirecting spawned actors).
  */
 template<bool bIsLoading>
-struct TSaveGameProxyArchive final : public FNameAsStringProxyArchive
+struct TSaveGameProxyArchive : public FNameAsStringProxyArchive
 {
-	TSaveGameProxyArchive(FArchive& InInnerArchive)
+	TSaveGameProxyArchive(FArchive& InInnerArchive, TMap<FSoftObjectPath, FSoftObjectPath>& InRedirects)
 		: FNameAsStringProxyArchive(InInnerArchive)
+		, Redirects(InRedirects)
 	{
 		// Setting this hints a Serialize method to only serialize SaveGame properties
 		ArIsSaveGame = true;
@@ -42,7 +43,7 @@ struct TSaveGameProxyArchive final : public FNameAsStringProxyArchive
 			// Actually perform the redirect
 			Value = Redirects[Value];
 		}
-		
+
 		return *this;
 	}
 
@@ -69,19 +70,19 @@ struct TSaveGameProxyArchive final : public FNameAsStringProxyArchive
 	{
 		return SerializeObject(Value);
 	}
-	
+
 	virtual FArchive& operator<<(FWeakObjectPtr& Value) override
 	{
 		return SerializeObject(Value);
 	}
-	
+
 	virtual FArchive& operator<<(FObjectPtr& Value) override
 	{
 		return SerializeObject(Value);
 	}
 
 private:
-	TMap<FSoftObjectPath, FSoftObjectPath> Redirects;
+	TMap<FSoftObjectPath, FSoftObjectPath>& Redirects;
 
 	template<typename ObjectType>
 	static FSoftObjectPath ToSoftObjectPath(const ObjectType& Value)

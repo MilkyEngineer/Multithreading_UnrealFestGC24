@@ -36,7 +36,7 @@ public:
 	{
 		return Record != nullptr;
 	}
-	
+
 	class FStructuredArchive::FRecord& GetRecord() const
 	{
 		return *Record;
@@ -87,10 +87,10 @@ public:
 
 		return true;
 	}
-	
+
 private:
 	FSaveGameArchive(FSaveGameArchive&) = delete;
-	
+
 	class FStructuredArchive::FRecord* Record;
 	TWeakObjectPtr<> Object;
 	uint64 StartPosition;
@@ -128,13 +128,20 @@ public:
 	 * Called after an object's SaveGame properties are serialized. Useful for serializing fields that can't be marked
 	 * with the SaveGame specifier (i.e. engine properties like transforms, velocity, etc). This method can also be
 	 * implemented as a "PostSerialize" event for this object.
-	 * 
+	 *
 	 * @param Archive The archive that fields will be serialized to/from
 	 * @param bIsLoading true if loading a save game, false if saving
 	 * @return Not used, but necessary to not turn this method into an event (useful for SerializeItem and local vars)
 	 */
 	UFUNCTION(BlueprintNativeEvent, Category=SaveGame)
 	bool OnSerialize(UPARAM(ref) FSaveGameArchive& Archive, bool bIsLoading);
+
+	/**
+	 * Returns true when the programmer is confident that the OnSerialize event is thread-safe.
+	 * Must be implemented in a thread-safe fashion (i.e. return true or false only).
+	 */
+	UFUNCTION(BlueprintNativeEvent, Category=SaveGame, meta=(BlueprintThreadSafe))
+	bool IsThreadSafe() const;
 };
 
 UINTERFACE(MinimalAPI)

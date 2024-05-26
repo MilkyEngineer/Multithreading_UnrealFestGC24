@@ -3,8 +3,10 @@
 #include "SaveGameFunctionLibrary.h"
 
 #include "SaveGameSettings.h"
+#include "SaveGameThreading.h"
 
 #if WITH_EDITOR
+#include "Blueprint/BlueprintExceptionInfo.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/KismetDebugUtilities.h"
 #include "Logging/MessageLog.h"
@@ -27,11 +29,11 @@ void BreakpointWithError(FFrame& Stack, const FText& Text)
 				if(UObjectToken->GetObject().IsValid())
 				{
 					FKismetEditorUtilities::BringKismetToFocusAttentionOnObject(UObjectToken->GetObject().Get());
-				}	
+				}
 			}
 		}
 	};
-		
+
 	FMessageLog MessageLog("PIE");
 	MessageLog.Error()
 		->AddToken(FUObjectToken::Create(Node, Node->GetNodeTitle(ENodeTitleType::ListView))
@@ -64,7 +66,7 @@ bool USaveGameFunctionLibrary::SerializeActorTransform(FSaveGameArchive& Archive
 		return (bIsLoading || bIsMovable) && Archive.SerializeField(TEXT("ActorTransform"), [&](FStructuredArchive::FSlot Slot)
 		{
 			FTransform ActorTransform;
-			
+
 			if (!bIsLoading)
 			{
 				ActorTransform = Actor->GetActorTransform();
@@ -75,8 +77,23 @@ bool USaveGameFunctionLibrary::SerializeActorTransform(FSaveGameArchive& Archive
 
 			if (bIsLoading && bIsMovable)
 			{
-				// If the actor is movable, set its transform
-				Actor->SetActorTransform(ActorTransform, false, nullptr, ETeleportType::TeleportPhysics);
+				auto SetActorTransform = [Actor, ActorTransform]
+				{
+					QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SetActorTransform);
+
+					// If the actor is movable, set its transform
+					Actor->SetActorTransform(ActorTransform, false, nullptr, ETeleportType::TeleportPhysics);
+				};
+
+				if (IsInGameThread())
+				{
+					// We're already in the game thread, execute immediately
+					SetActorTransform();
+				}
+				else
+				{
+					ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(SetActorTransform));
+				}
 			}
 		});
 	}
@@ -102,9 +119,9 @@ DEFINE_FUNCTION(USaveGameFunctionLibrary::execSerializeItem)
 
 	// If we're saving, should we serialize this value?
 	P_GET_UBOOL(bSave);
-	
+
 	P_FINISH;
-	
+
 	P_NATIVE_BEGIN;
 
 	*(bool*)RESULT_PARAM = false;
@@ -122,12 +139,12 @@ DEFINE_FUNCTION(USaveGameFunctionLibrary::execSerializeItem)
 		Archive.SerializeField(ValueProperty->GetFName(), [&](FStructuredArchive::FSlot Slot)
 		{
 			// Note: SerializeItem will not handle type conversions, though ConvertFromType will do this with some
-			// questionable address arithmetic 
+			// questionable address arithmetic
 			ValueProperty->SerializeItem(Slot, ValueAddress, nullptr);
 			*(bool*)RESULT_PARAM = true;
 		});
 	}
-	
+
 	P_NATIVE_END;
 }
 
@@ -155,4 +172,54 @@ int32 USaveGameFunctionLibrary::UseCustomVersion(FSaveGameArchive& Archive, cons
 	}
 
 	return INDEX_NONE;
+}
+
+void USaveGameFunctionLibrary::CallOnGameThread(int32 Delegate)
+{
+	// Shouldn't ever get to here
+	check(false);
+}
+
+DEFINE_FUNCTION(USaveGameFunctionLibrary::execCallOnGameThread)
+{
+	P_GET_PROPERTY(FDelegateProperty, Delegate);
+
+	check(Delegate.IsBound());
+
+	const UFunction* Function = Delegate.GetUObject()->FindFunctionChecked(Delegate.GetFunctionName());
+
+	void* Data = FMemory::Malloc(Function->ParmsSize);
+
+	for (const FProperty* Property = (FProperty*)(Function->ChildProperties); *Stack.Code != EX_EndFunctionParms; Property = (FProperty*)(Property->Next))
+	{
+		void* PropAddress = Property->ContainerPtrToValuePtr<uint8>(Data);
+		Stack.StepCompiledIn(PropAddress, Property->GetClass());
+	}
+
+	P_FINISH;
+
+	P_NATIVE_BEGIN;
+	auto ProcessDelegate = [Delegate, Data]
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_CallOnGameThread_ThreadTask);
+
+		if (Delegate.GetUObject())
+		{
+			Delegate.ProcessDelegate<UObject>(Data);
+		}
+
+		FMemory::Free(Data);
+	};
+
+	if (IsInGameThread())
+	{
+		// We're already in the game thread, execute immediately
+		ProcessDelegate();
+	}
+	else
+	{
+		ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(ProcessDelegate));
+	}
+
+	P_NATIVE_END;
 }

@@ -1,13 +1,15 @@
-﻿// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 #include "SaveGameSettings.h"
 
 FGuid USaveGameSettings::GetVersionId(const UEnum* VersionEnum) const
 {
+	FScopeLock Lock(&VersionsSection);
+
 	if (CachedVersions.IsEmpty())
 	{
 		CachedVersions.Reserve(Versions.Num());
-		
+
 		for (const FSaveGameVersionInfo& VersionInfo : Versions)
 		{
 			if (VersionInfo.ID.IsValid() && VersionInfo.Enum)
@@ -21,7 +23,7 @@ FGuid USaveGameSettings::GetVersionId(const UEnum* VersionEnum) const
 	{
 		return CachedVersions[VersionEnum];
 	}
-	
+
 	return FGuid();
 }
 
@@ -29,9 +31,10 @@ FGuid USaveGameSettings::GetVersionId(const UEnum* VersionEnum) const
 void USaveGameSettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	
+
 	if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(USaveGameSettings, Versions))
 	{
+		FScopeLock Lock(&VersionsSection);
 		CachedVersions.Reset();
 	}
 }

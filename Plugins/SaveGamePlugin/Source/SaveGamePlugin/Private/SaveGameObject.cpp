@@ -13,7 +13,7 @@ FSaveGameArchive::FSaveGameArchive(FStructuredArchive::FRecord& InRecord, UObjec
 	// This is useful if proxy archives override this for scoping purposes
 	// i.e. serializing nested sub-objects
 	Archive.MarkScriptSerializationStart(Object.Get());
-	
+
 	if (Archive.IsTextFormat())
 	{
 		return;
@@ -41,11 +41,11 @@ FSaveGameArchive::FSaveGameArchive(FStructuredArchive::FRecord& InRecord, UObjec
 		for (auto It = Fields.CreateIterator(); It; ++It)
 		{
 			TPair<FName, uint64>& Field = *It;
-					
+
 			for (UStruct* CheckStruct = Object->GetClass(); CheckStruct; CheckStruct = CheckStruct->GetSuperStruct())
 			{
 				FName NewProperty = FProperty::FindRedirectedPropertyName(CheckStruct, Field.Key);
-					
+
 				if (!NewProperty.IsNone())
 				{
 					Field.Key = NewProperty;
@@ -63,7 +63,7 @@ FSaveGameArchive::~FSaveGameArchive()
 	{
 		return;
 	}
-		
+
 	FArchive& Archive = Record->GetUnderlyingArchive();
 
 	ON_SCOPE_EXIT
@@ -75,11 +75,11 @@ FSaveGameArchive::~FSaveGameArchive()
 	{
 		return;
 	}
-	
+
 	if (Archive.IsSaving())
 	{
 		uint64 FieldsOffset = Archive.Tell() - StartPosition;
-		
+
 		// Store our accrued list of fields and their offsets
 		Archive << Fields;
 

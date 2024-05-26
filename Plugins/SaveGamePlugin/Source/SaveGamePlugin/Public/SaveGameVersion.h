@@ -1,4 +1,4 @@
-﻿// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 #pragma once
 
@@ -14,6 +14,6 @@ public:
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
 	};
-	
+
 	const static FGuid GUID;
 };

@@ -16,7 +16,7 @@ class SAVEGAMEPLUGIN_API USaveGameFunctionLibrary : public UBlueprintFunctionLib
 public:
 	/**
 	 * Check if an object was loaded from an asset (i.e. a Static Mesh, Actor from a level, etc.)
-	 * 
+	 *
 	 * @param Object The object to check if loaded
 	 * @return true if object was loaded from an asset
 	 */
@@ -25,7 +25,7 @@ public:
 
 	/**
 	 * Check to see if the current save game is loading the archive.
-	 * 
+	 *
 	 * @param Archive The archive that the save game is serializing
 	 * @return true if save game is loading, false if save game is saving
 	 */
@@ -35,7 +35,7 @@ public:
 	/**
 	 * Helper method to serialize an actor's transform if the actor is movable.
 	 * If loading, will set the actor's transform.
-	 * 
+	 *
 	 * @param Archive The archive that the save game is serializing
 	 * @param Actor The actor whose transform will be serialized
 	 * @return true if the transform was serialized
@@ -45,10 +45,10 @@ public:
 
 	/**
 	 * Serialize a property to/from the specified archive.
-	 * 
+	 *
 	 * OnSave: Store the value of the property to the archive (if bSave is true)
-	 * OnLoad: Read the archive, if the value exists, load by reference into the property connected to Value 
-	 * 
+	 * OnLoad: Read the archive, if the value exists, load by reference into the property connected to Value
+	 *
 	 * @param Archive The archive that the save game is serializing
 	 * @param Value The property that will be serialized (by reference)
 	 * @param bSave If true, will save this property, otherwise not if false. Not used when loading.
@@ -63,11 +63,15 @@ public:
 	 *
 	 * OnSave: Stores the latest value of the version to the archive.
 	 * OnLoad: Reads the version from the save game archive (if any)
-	 * 
+	 *
 	 * @param Archive The archive that the save game is serializing
 	 * @param VersionEnum The enum of the version we want to serialize
 	 * @return The version that was serialized (-1 if not exist or no version)
 	 */
 	UFUNCTION(BlueprintCallable, Category="SaveGamePlugin|Serialize")
 	static int32 UseCustomVersion(UPARAM(ref) FSaveGameArchive& Archive, const UEnum* VersionEnum);
+
+	UFUNCTION(BlueprintCallable, CustomThunk, Category="EnhancedSaveGame|Threading", meta=(Variadic, CustomStructureParam="Delegate", BlueprintInternalUseOnly = "true"))
+	static void CallOnGameThread(int32 Delegate);
+	DECLARE_FUNCTION(execCallOnGameThread);
 };

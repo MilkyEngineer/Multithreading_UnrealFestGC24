@@ -1,19 +1,21 @@
-﻿// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 #pragma once
 
-#if WITH_TEXT_ARCHIVE_SUPPORT
-#include "Serialization/Formatters/JsonArchiveOutputFormatter.h"
-#endif
-
-#include "SaveGameProxyArchive.h"
+#include "Templates/ChooseClass.h"
+#include "Tasks/Task.h"
 
 class USaveGameSubsystem;
+
+template <bool bIsLoading> class TSaveGameArchive;
 
 class FSaveGameSerializer :  public TSharedFromThis<FSaveGameSerializer>
 {
 public:
 	virtual ~FSaveGameSerializer() = default;
+
+	virtual bool IsLoading() const = 0;
+	virtual UE::Tasks::FTask DoOperation() = 0;
 };
 
 /**
@@ -39,28 +41,22 @@ public:
  *			- Version Number
  *		- ...
  */
-template<bool bIsLoading, bool bIsTextFormat = false>
+template<bool bIsLoading>
 class TSaveGameSerializer final : public FSaveGameSerializer
 {
-	using FSaveGameMemoryArchive = typename TChooseClass<bIsLoading, FMemoryReader, FMemoryWriter>::Result;
+	using TSaveGameMemoryArchive = typename TChooseClass<bIsLoading, FMemoryReader, FMemoryWriter>::Result;
 
-	static_assert(!bIsLoading || !bIsTextFormat, "This serializer hasn't been implemented for text based loading, only saving!");
-	static_assert(WITH_TEXT_ARCHIVE_SUPPORT || !bIsTextFormat, "Engine isn't compiled with text archive support, cannot use text based TSaveGameSerializer");
-	
-	using FSaveGameFormatter = typename TChooseClass<bIsTextFormat && WITH_TEXT_ARCHIVE_SUPPORT,
-		typename TChooseClass<bIsLoading, FBinaryArchiveFormatter, FJsonArchiveOutputFormatter>::Result,
-		FBinaryArchiveFormatter>::Result;
-	
 public:
 	TSaveGameSerializer(USaveGameSubsystem* InSaveGameSubsystem);
+	virtual ~TSaveGameSerializer() override;
 
-	bool Save();
-	bool Load();
+	virtual bool IsLoading() const override { return bIsLoading; }
+	virtual UE::Tasks::FTask DoOperation() override;
 
 private:
 	static FString GetSaveName();
-	
-	void OnMapLoad(UWorld* World);
+
+	void SerializeVersionOffset();
 
 	/** Serializes information about the archive, like Map Name, and position of versioning information */
 	void SerializeHeader();
@@ -81,32 +77,14 @@ private:
 	 */
 	void SerializeVersions();
 
-	/**
-	 * Serializes the actor's data into the structured archive.
-	 * This data always comprises of the actor's object name, and optionally its:
-	 * - Class: If the actor was spawned (so that it can be spawned again)
-	 * - SpawnID: If the actor implements ISaveGameSpawnActor. A unique identifier to map the data back to an already
-	 *				spawned actor (like the player's character)
-	 *
-	 * It also takes a lambda function that can optionally do some work or serialization. Ultimately, once this
-	 * lambda function is complete, SerializeActor will automatically seek the archive to the end of the actor's data.
-	 * 
-	 * @param ActorMap The structured map that the actor data will be written to
-	 * @param Actor The live actor that will be serialized
-	 * @param BodyFunction A lambda function that will optionally do some work, whether that be serializing or spawning
-	 */
-	void SerializeActor(FStructuredArchive::FMap& ActorMap, AActor*& Actor, TFunction<void(const FString&, const FSoftClassPath&, const FGuid&, FStructuredArchive::FSlot&)>&& BodyFunction);
-	
-	const TWeakObjectPtr<USaveGameSubsystem> SaveGameSubsystem;
+private:
+	USaveGameSubsystem* Subsystem;
 	TArray<uint8> Data;
-	FSaveGameMemoryArchive Archive;
-	TSaveGameProxyArchive<bIsLoading> ProxyArchive;
-	FSaveGameFormatter Formatter;
-	FStructuredArchive StructuredArchive;
-	
-	FStructuredArchive::FSlot RootSlot;
-	FStructuredArchive::FRecord RootRecord;
+	TSaveGameMemoryArchive Archive;
+	TMap<FSoftObjectPath, FSoftObjectPath> Redirects;
+	TSaveGameArchive<bIsLoading>* SaveArchive;
 
 	FString MapName;
 	uint64 VersionOffset;
 };
+

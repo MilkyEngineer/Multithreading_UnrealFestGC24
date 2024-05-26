@@ -1,4 +1,4 @@
-﻿// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
+// Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
 #pragma once
 
@@ -47,5 +47,6 @@ protected:
 	TArray<FSaveGameVersionInfo> Versions;
 
 private:
+	mutable FCriticalSection VersionsSection;
 	mutable TMap<TObjectPtr<UEnum>, FGuid> CachedVersions;
 };
