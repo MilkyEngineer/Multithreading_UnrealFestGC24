@@ -9,7 +9,6 @@
 #include "BlueprintNodeSpawner.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CreateDelegate.h"
-#include "K2Node_CustomEvent.h"
 #include "KismetCompiler.h"
 #include "ToolMenu.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -23,9 +22,38 @@ FText CreateTitle(const FText& FunctionName)
 	return FText::Format(LOCTEXT("CallOnGameThread_MenuTitle", "Game Thread: {0}"), FunctionName);
 }
 
-FText UK2Node_CallOnGameThread::GetNodeTitle(ENodeTitleType::Type TitleType) const
+FText CreateCategory(const UFunction* Function)
 {
-	return CreateTitle(Super::GetNodeTitle(TitleType));
+	if (Function)
+	{
+		return UK2Node_CallFunction::GetDefaultCategoryForFunction(
+			Function, LOCTEXT("CallOnGameThread_CategoryTitle", "Call on Game Thread"));
+	}
+	return FText::GetEmpty();
+}
+
+FText UK2Node_CallOnGameThread::GetMenuCategory() const
+{
+	return CreateCategory(GetTargetFunction());
+}
+
+FText UK2Node_CallOnGameThread::GetTooltipText() const
+{
+	return FText::Format(
+		LOCTEXT("CallOnGameThread_TooltipText",
+			"Will ensure that this function is run from the Game Thread.\n"
+			"{0}"), Super::GetTooltipText());
+}
+
+FSlateIcon UK2Node_CallOnGameThread::GetIconAndTint(FLinearColor& OutColor) const
+{
+	OutColor = GetNodeTitleColor();
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), "Graph.AnimationFastPathIndicator");
+}
+
+FLinearColor UK2Node_CallOnGameThread::GetNodeTitleColor() const
+{
+	return FLinearColor(0.2f, 0.8f, 0.2f);
 }
 
 void UK2Node_CallOnGameThread::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
@@ -44,7 +72,7 @@ void UK2Node_CallOnGameThread::ExpandNode(FKismetCompilerContext& CompilerContex
 
 	check(CreateDelegate_Node->GetFunctionName().IsValid());
 
-	UFunction* CallOnGameThread = USaveGameFunctionLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(USaveGameFunctionLibrary, CallOnGameThread));
+	const UFunction* CallOnGameThread = USaveGameFunctionLibrary::StaticClass()->FindFunctionByName(GET_FUNCTION_NAME_CHECKED(USaveGameFunctionLibrary, CallOnGameThread));
 	UK2Node_CallFunction* CallFunction_Node = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
 	CallFunction_Node->SetFromFunction(CallOnGameThread);
 	CallFunction_Node->AllocateDefaultPins();
@@ -56,12 +84,11 @@ void UK2Node_CallOnGameThread::ExpandNode(FKismetCompilerContext& CompilerContex
 	bSuccess &= CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(UEdGraphSchema_K2::PN_Execute), *CallFunction_Node->FindPinChecked(UEdGraphSchema_K2::PN_Execute)).CanSafeConnect();
 	bSuccess &= CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(UEdGraphSchema_K2::PN_Then), *CallFunction_Node->FindPinChecked(UEdGraphSchema_K2::PN_Then)).CanSafeConnect();
 
+	UEdGraphPin* CreateDelegate_DelegatePin = CreateDelegate_Node->GetDelegateOutPin();
 	UEdGraphPin* CallFunction_DelegatePin = CallFunction_Node->FindPinChecked(PN_Delegate);
-	CallFunction_DelegatePin->PinType.PinCategory = UEdGraphSchema_K2::PC_Delegate;
-	FMemberReference::FillSimpleMemberReference<UFunction>(TargetFunction, CallFunction_DelegatePin->PinType.PinSubCategoryMemberReference);
 
 	// Connect delegate pins
-	bSuccess &= Schema->TryCreateConnection(CallFunction_DelegatePin, CreateDelegate_Node->GetDelegateOutPin());
+	bSuccess &= Schema->TryCreateConnection(CallFunction_DelegatePin, CreateDelegate_DelegatePin);
 
 	for (UEdGraphPin* Pin : Pins)
 	{
@@ -75,6 +102,9 @@ void UK2Node_CallOnGameThread::ExpandNode(FKismetCompilerContext& CompilerContex
 			bSuccess &= CompilerContext.MovePinLinksToIntermediate(*Pin, *OtherPin).CanSafeConnect();
 		}
 	}
+
+	// We need to do this here... as it gets overridden by TryCreateConnection
+	FMemberReference::FillSimpleMemberReference<UFunction>(TargetFunction, CallFunction_DelegatePin->PinType.PinSubCategoryMemberReference);
 }
 
 void UK2Node_CallOnGameThread::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegistrar) const
@@ -91,9 +121,11 @@ void UK2Node_CallOnGameThread::GetMenuActions(FBlueprintActionDatabaseRegistrar&
 			}
 		}
 
-		static void SetUISpec(const FBlueprintActionContext& /*Context*/, const IBlueprintNodeBinder::FBindingSet& Bindings, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UFunction> Function)
+		static void SetUISpec(const FBlueprintActionContext& /*Context*/, const IBlueprintNodeBinder::FBindingSet& Bindings, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UFunction> FunctionPtr)
 		{
-			UiSpecOut->MenuName = CreateTitle(GetUserFacingFunctionName(Function.Get()));
+			const UFunction* Function = FunctionPtr.Get();
+			UiSpecOut->MenuName = GetUserFacingFunctionName(Function);
+			UiSpecOut->Category = CreateCategory(Function);
 		}
 	};
 
@@ -136,6 +168,15 @@ void UK2Node_CallOnGameThread::GetMenuActions(FBlueprintActionDatabaseRegistrar&
 			}
 		}
 	}
+}
+
+bool UK2Node_CallOnGameThread::CanPasteHere(const UEdGraph* TargetGraph) const
+{
+	UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(TargetGraph);
+	return Super::CanPasteHere(TargetGraph)
+		&& TargetGraph && TargetGraph->GetFName() == GET_FUNCTION_NAME_CHECKED(ISaveGameObject, OnSerialize)
+		&& Blueprint && FBlueprintEditorUtils::ImplementsInterface(Blueprint, true, USaveGameObject::StaticClass())
+		&& FBlueprintEditorUtils::GetInterfaceFunction(Blueprint, TargetGraph->GetFName());
 }
 
 #undef LOCTEXT_NAMESPACE

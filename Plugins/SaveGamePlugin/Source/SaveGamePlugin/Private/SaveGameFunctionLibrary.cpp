@@ -77,12 +77,15 @@ bool USaveGameFunctionLibrary::SerializeActorTransform(FSaveGameArchive& Archive
 
 			if (bIsLoading && bIsMovable)
 			{
-				auto SetActorTransform = [Actor, ActorTransform]
+				auto SetActorTransform = [Actor = TWeakObjectPtr<AActor>(Actor), ActorTransform]
 				{
 					QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SetActorTransform);
 
 					// If the actor is movable, set its transform
-					Actor->SetActorTransform(ActorTransform, false, nullptr, ETeleportType::TeleportPhysics);
+					if (Actor.IsValid())
+					{
+						Actor->SetActorTransform(ActorTransform, false, nullptr, ETeleportType::TeleportPhysics);
+					}
 				};
 
 				if (IsInGameThread())
