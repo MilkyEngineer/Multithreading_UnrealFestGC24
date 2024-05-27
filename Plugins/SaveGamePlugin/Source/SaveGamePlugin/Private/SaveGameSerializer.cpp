@@ -500,7 +500,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_Serialize);
 
 		FSaveGameTheadScope GameThreadScope;
-		FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads());
+		FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundHigh);
 
 		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
 		{
