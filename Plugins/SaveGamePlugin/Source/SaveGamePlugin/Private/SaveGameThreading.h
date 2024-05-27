@@ -21,8 +21,5 @@ public:
 	FSaveGameTheadScope();
 	~FSaveGameTheadScope();
 
-	void PumpThread() const;
-
-private:
-	const uint32 ThreadId;
+	void ProcessThread() const;
 };

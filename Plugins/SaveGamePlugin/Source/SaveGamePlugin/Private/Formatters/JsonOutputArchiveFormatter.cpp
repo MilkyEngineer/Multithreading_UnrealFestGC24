@@ -16,7 +16,7 @@ FString Tabber(const int32 NumTabs)
 	{
 		Tabs += TEXT("\t");
 	}
-	
+
 	return Tabs;
 }
 
@@ -35,7 +35,7 @@ void FJsonOutputArchiveFormatter::EnterRecord()
 {
 	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-	
+
 	if (Stack.Num() > 0)
 	{
 		FStackObject& Current = GetCurrent();
@@ -48,7 +48,7 @@ void FJsonOutputArchiveFormatter::EnterRecord()
 		check(!RootObject.IsValid());
 		RootObject = Object;
 	}
-	
+
 	Stack.Push(Object);
 }
 
@@ -286,7 +286,7 @@ void FJsonOutputArchiveFormatter::Serialize(FWeakObjectPtr& Value)
 
 void FJsonOutputArchiveFormatter::Serialize(FSoftObjectPtr& Value)
 {
-	SetValue<FJsonValueString>(Value.ToString());	
+	SetValue<FJsonValueString>(Value.ToString());
 }
 
 void FJsonOutputArchiveFormatter::Serialize(FSoftObjectPath& Value)
@@ -321,12 +321,12 @@ void FJsonOutputArchiveFormatter::Serialize(const TSharedRef<FJsonObject>& Value
 	// Replace the current record
 	check(Current.Object->Values.Num() == 0);
 	Current.Object = Value;
-	
+
 	if (Stack.Num() > 1)
 	{
 		// We've got a parent, ensure its field is replaced with the new object
 		FStackObject& Parent = Stack.Last(1);
-		
+
 		check(!Parent.Field.IsEmpty());
 		Parent.Object->SetObjectField(Parent.Field, Value);
 	}
@@ -362,13 +362,14 @@ void FJsonOutputArchiveFormatter::SetValue(const TSharedRef<FJsonValue>& Value)
 	check(!Current.Field.IsEmpty());
 
 	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s = %s"), *Tabber(Stack.Num()), __FUNCTION__, *Current.Field, *Value->AsString());
-	
+
 	if (Current.bInStream)
 	{
 		Current.StreamValues.Add(Value);
 	}
 	else
 	{
+		Current.Object->RemoveField(Current.Field);
 		Current.Object->SetField(Current.Field, Value);
 	}
 }

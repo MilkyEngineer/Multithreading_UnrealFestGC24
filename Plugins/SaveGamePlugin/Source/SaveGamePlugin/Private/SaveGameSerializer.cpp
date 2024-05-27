@@ -383,116 +383,141 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 	constexpr TCHAR DataSizeName[] = TEXT("DataSize");
 	FStructuredArchive::FMap ActorMap = SaveArchive->GetRecord().EnterMap(TEXT("Actors"), NumActors);
 
+	constexpr bool bForceSingleThreaded = false;
+	FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundNormal);
+
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_InitializeActors);
 
+		TAtomic<uint32> CompletedJobs = 0;
 		ActorData.SetNumZeroed(NumActors);
 
 		// Iterate through the saved actors and spawn or find their live equivalent
 		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
 		{
-			FSoftClassPath Class;
-			FGuid SpawnID;
-			FActorInfo& ActorInfo = ActorData[ActorIdx];
-			TWeakObjectPtr<AActor>& Actor = ActorInfo.Actor;
-
-			if (bIsLoading)
+			auto InitActor = [&, ActorIdx](uint32)
 			{
-				// For saving, need to do this later
-				FStructuredArchive::FSlot ActorSlot = ActorMap.EnterElement(ActorInfo.Name);
-				ActorSlot.EnterRecord().EnterField(DataSizeName) << ActorInfo.DataSize;
+				FSoftClassPath Class;
+				FGuid SpawnID;
+				FActorInfo& ActorInfo = ActorData[ActorIdx];
+				TWeakObjectPtr<AActor>& Actor = ActorInfo.Actor;
 
-				// When loading, we already have the data, so reuse our current data
-				ActorInfo.CreateArchive(Data, Redirects);
-				ActorInfo.Archive->GetArchive().Seek(SaveArchive->GetArchive().Tell());
-				ActorInfo.Archive->ConsolidateVersions(*SaveArchive);
-			}
-			else
-			{
-				ActorInfo.Actor = SaveGameActors[ActorIdx].Get();
-				ActorInfo.Name = ActorInfo.Actor->GetName();
+				const FString EventStr = FString::Printf(TEXT("Actor: %i"), ActorIdx);
+				SCOPED_NAMED_EVENT_FSTRING(EventStr, FColor::Red);
 
-				// When saving, we need to dump the data into
-				ActorInfo.CreateArchive(ActorInfo.Data, Redirects);
-
-				if (!USaveGameFunctionLibrary::WasObjectLoaded(Actor.Get()))
+				if (bIsLoading)
 				{
-					// We're a spawned actor, stash the class
-					Class = Actor->GetClass();
-				}
+					// For saving, need to do this later
+					FStructuredArchive::FSlot ActorSlot = ActorMap.EnterElement(ActorInfo.Name);
+					ActorSlot.EnterRecord().EnterField(DataSizeName) << ActorInfo.DataSize;
 
-				if (Actor->Implements<USaveGameSpawnActor>())
-				{
-					SpawnID = ISaveGameSpawnActor::Execute_GetSpawnID(Actor.Get());
-				}
-			}
-
-			const uint64 ActorStartPosition = SaveArchive->GetArchive().Tell();
-
-			FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
-
-			ensureAlways(!ActorInfo.Name.IsEmpty());
-
-			// If we have a class, we're a spawned actor
-			if (TOptional<FStructuredArchive::FSlot> ClassSlot = Record.TryEnterField(TEXT("Class"), !Class.IsNull()))
-			{
-				ClassSlot.GetValue() << Class;
-			}
-
-			// If we have a GUID, we're a spawn actor that needs to be mapped by GUID
-			TOptional<FStructuredArchive::FSlot> GuidSlot = Record.TryEnterField(TEXT("GUID"), SpawnID.IsValid());
-			if (GuidSlot.IsSet())
-			{
-				GuidSlot.GetValue() << SpawnID;
-			}
-
-			if (bIsLoading)
-			{
-				if (Class.IsNull())
-				{
-					// This is a loaded actor (is a level actor), let's find it
-					Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
-				}
-				else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
-				{
-					Actor = SpawnIDs[SpawnID];
+					// When loading, we already have the data, so reuse our current data
+					ActorInfo.CreateArchive(Data, Redirects);
+					ActorInfo.Archive->GetArchive().Seek(SaveArchive->GetArchive().Tell());
+					ActorInfo.Archive->ConsolidateVersions(*SaveArchive);
 				}
 				else
 				{
-					UClass* ActorClass = Class.TryLoadClass<AActor>();
+					ActorInfo.Actor = SaveGameActors[ActorIdx].Get();
+					ActorInfo.Name = ActorInfo.Actor->GetName();
 
-					// This is a spawned actor, let's spawn it
-					FActorSpawnParameters SpawnParameters;
+					// When saving, we need to dump the data into
+					ActorInfo.CreateArchive(ActorInfo.Data, Redirects);
 
-					// If we were handling levels, specify it here
-					SpawnParameters.OverrideLevel = World->GetCurrentLevel();
-					SpawnParameters.Name = *ActorInfo.Name;
-					SpawnParameters.bNoFail = true;
-
-					Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
-
-					if (SpawnID.IsValid() && Actor->Implements<USaveGameSpawnActor>())
+					if (!USaveGameFunctionLibrary::WasObjectLoaded(Actor.Get()))
 					{
-						ISaveGameSpawnActor::Execute_SetSpawnID(Actor.Get(), SpawnID);
+						// We're a spawned actor, stash the class
+						Class = Actor->GetClass();
+					}
+
+					if (Actor->Implements<USaveGameSpawnActor>())
+					{
+						SpawnID = ISaveGameSpawnActor::Execute_GetSpawnID(Actor.Get());
 					}
 				}
 
-				if (SpawnID.IsValid())
-				{
-					const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
+				const uint64 ActorStartPosition = bIsLoading ? SaveArchive->GetArchive().Tell() : UINT64_MAX;
 
-					// We potentially have a spawned actor that other actors reference
-					// If the name has changed, be sure to redirect the old actor path to the new one
-					ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(Actor.Get()));
+				FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
+
+				ensureAlways(!ActorInfo.Name.IsEmpty());
+
+				// If we have a class, we're a spawned actor
+				if (TOptional<FStructuredArchive::FSlot> ClassSlot = Record.TryEnterField(TEXT("Class"), !Class.IsNull()))
+				{
+					ClassSlot.GetValue() << Class;
 				}
 
-				// Ensure we have an initialized data size
-				check(ActorInfo.DataSize != UINT64_MAX);
+				// If we have a GUID, we're a spawn actor that needs to be mapped by GUID
+				if (TOptional<FStructuredArchive::FSlot> GuidSlot = Record.TryEnterField(TEXT("GUID"), SpawnID.IsValid()))
+				{
+					GuidSlot.GetValue() << SpawnID;
+				}
 
-				// As we'll be deferring serialization, we need to skip over to the next actor
-				SaveArchive->GetArchive().Seek(ActorStartPosition + ActorInfo.DataSize);
+				if (bIsLoading)
+				{
+					if (Class.IsNull())
+					{
+						// This is a loaded actor (is a level actor), let's find it
+						Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
+					}
+					else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
+					{
+						Actor = SpawnIDs[SpawnID];
+					}
+					else
+					{
+						UClass* ActorClass = Class.TryLoadClass<AActor>();
+
+						// This is a spawned actor, let's spawn it
+						FActorSpawnParameters SpawnParameters;
+
+						// If we were handling levels, specify it here
+						SpawnParameters.OverrideLevel = World->GetCurrentLevel();
+						SpawnParameters.Name = *ActorInfo.Name;
+						SpawnParameters.bNoFail = true;
+
+						Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
+
+						if (SpawnID.IsValid() && Actor->Implements<USaveGameSpawnActor>())
+						{
+							ISaveGameSpawnActor::Execute_SetSpawnID(Actor.Get(), SpawnID);
+						}
+					}
+
+					if (SpawnID.IsValid())
+					{
+						const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
+
+						// We potentially have a spawned actor that other actors reference
+						// If the name has changed, be sure to redirect the old actor path to the new one
+						ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(Actor.Get()));
+					}
+
+					// Ensure we have an initialized data size
+					check(ActorInfo.DataSize != UINT64_MAX);
+
+					// As we'll be deferring serialization, we need to skip over to the next actor
+					SaveArchive->GetArchive().Seek(ActorStartPosition + ActorInfo.DataSize);
+				}
+
+				++CompletedJobs;
+			};
+
+			if (bIsLoading || bForceSingleThreaded)
+			{
+				InitActor(ActorIdx);
+			}
+			else
+			{
+				ConcurrencyLimiter.Push(UE_SOURCE_LOCATION, InitActor);
 			}
 		}
+
+		ConcurrencyLimiter.Wait();
+
+		const uint32 NumCompleted = CompletedJobs.Load();
+		checkf(NumCompleted == NumActors, TEXT("Completed only %i of %i jobs!"), NumCompleted, NumActors);
 	}
 
 	// Actually do the serialization of each actor (now that we've updated redirects)
@@ -500,13 +525,11 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_Serialize);
 
 		FSaveGameTheadScope GameThreadScope;
-		FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundHigh);
+		TAtomic<uint32> CompletedJobs = 0;
 
 		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
 		{
-			constexpr bool bForceSingleThreaded = false;
-
-			auto SerializeLambda = [&ActorData,ActorIdx](uint32)
+			auto SerializeLambda = [&CompletedJobs, &ActorData, ActorIdx](uint32)
 			{
 				check(bForceSingleThreaded || !IsInGameThread());
 
@@ -519,7 +542,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 				// Since we have control of the game thread, we should be pretty safe to serialize our properties
 				Actor->SerializeScriptProperties(Record.EnterField(TEXT("Properties")));
 
-				ISaveGameThreadQueue::FTaskFunction CallOnSerialize = [&ActorInfo]
+				ISaveGameThreadQueue::FTaskFunction CallOnSerialize = [&CompletedJobs, &ActorInfo]
 				{
 					QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_OnSerialize);
 
@@ -532,6 +555,8 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 					FSaveGameArchive SaveGameArchive(CustomDataRecord, Actor);
 
 					ISaveGameObject::Execute_OnSerialize(Actor, SaveGameArchive, bIsLoading);
+
+					++CompletedJobs;
 				};
 
 				if (bForceSingleThreaded || ISaveGameObject::Execute_IsThreadSafe(Actor))
@@ -555,21 +580,24 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 			}
 		}
 
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
-		const FTimespan ConcurrencyTimeout(1000);
-
-		do
+		if (!bForceSingleThreaded)
 		{
-			// Pump the Work Queue on the game thread
-			GameThreadScope.PumpThread();
-		}
-		while (!ConcurrencyLimiter.Wait(ConcurrencyTimeout));
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
 
-		GameThreadScope.PumpThread();
+			// Pump the Work Queue on the game thread
+			GameThreadScope.ProcessThread();
+			while (CompletedJobs.Load() != NumActors)
+			{
+				FPlatformProcess::YieldCycles(10000);
+				GameThreadScope.ProcessThread();
+			}
+		}
 	}
 
 	if (!bIsLoading)
 	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_MergeThreadData);
+
 		// Merge each actor's save data
 		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
 		{

@@ -5,8 +5,13 @@
 class FSaveGameThreadQueue final : public ISaveGameThreadQueue
 {
 public:
+	FSaveGameThreadQueue()
+		: ThreadId(FPlatformTLS::GetCurrentThreadId())
+	{}
+
 	virtual ~FSaveGameThreadQueue() override
 	{
+		check(ThreadId == FPlatformTLS::GetCurrentThreadId());
 		check(IsComplete());
 	}
 
@@ -15,9 +20,11 @@ public:
 		WorkQueue.Push(new FTaskFunction(Task));
 	}
 
-	void PumpQueue()
+	void ProcessThread()
 	{
-		while (FTaskFunction* Function = WorkQueue.Pop())
+		check(ThreadId == FPlatformTLS::GetCurrentThreadId());
+
+		while (const FTaskFunction* Function = WorkQueue.Pop())
 		{
 			(*Function)();
 			delete Function;
@@ -27,6 +34,7 @@ public:
 	bool IsComplete() const { return WorkQueue.IsEmpty(); }
 
 private:
+	const uint32 ThreadId;
 	TLockFreePointerListFIFO<FTaskFunction, PLATFORM_CACHE_LINE_SIZE> WorkQueue;
 };
 
@@ -39,7 +47,6 @@ ISaveGameThreadQueue& ISaveGameThreadQueue::Get()
 }
 
 FSaveGameTheadScope::FSaveGameTheadScope()
-	: ThreadId(FPlatformTLS::GetCurrentThreadId())
 {
 	check(!GSaveGameThreadQueue.IsValid());
 	GSaveGameThreadQueue = MakeShared<FSaveGameThreadQueue>();
@@ -48,12 +55,10 @@ FSaveGameTheadScope::FSaveGameTheadScope()
 FSaveGameTheadScope::~FSaveGameTheadScope()
 {
 	check(GSaveGameThreadQueue.IsValid());
-	check(ThreadId == FPlatformTLS::GetCurrentThreadId());
 	GSaveGameThreadQueue.Reset();
 }
 
-void FSaveGameTheadScope::PumpThread() const
+void FSaveGameTheadScope::ProcessThread() const
 {
-	check(ThreadId == FPlatformTLS::GetCurrentThreadId());
-	GSaveGameThreadQueue->PumpQueue();
+	GSaveGameThreadQueue->ProcessThread();
 }
