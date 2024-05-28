@@ -5,21 +5,6 @@
 #if WITH_TEXT_ARCHIVE_SUPPORT
 #include "DOM/JsonObject.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogJsonOutputArchiveFormatter, Log, All);
-
-FString Tabber(const int32 NumTabs)
-{
-	FString Tabs;
-	Tabs.Reserve(NumTabs * 4);
-
-	for (int32 i = 0; i < NumTabs; ++i)
-	{
-		Tabs += TEXT("\t");
-	}
-
-	return Tabs;
-}
-
 FArchive& FJsonOutputArchiveFormatter::GetUnderlyingArchive()
 {
 	static FArchive NullArchive;
@@ -33,7 +18,6 @@ bool FJsonOutputArchiveFormatter::HasDocumentTree() const
 
 void FJsonOutputArchiveFormatter::EnterRecord()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
 
 	if (Stack.Num() > 0)
@@ -55,7 +39,6 @@ void FJsonOutputArchiveFormatter::EnterRecord()
 void FJsonOutputArchiveFormatter::LeaveRecord()
 {
 	Stack.Pop(false);
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterField(FArchiveFieldName Name)
@@ -63,8 +46,6 @@ void FJsonOutputArchiveFormatter::EnterField(FArchiveFieldName Name)
 	FStackObject& Current = GetCurrent();
 	check(!Current.bInStream);
 	Current.Field = FString(Name.Name);
-
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s"), *Tabber(Stack.Num()), __FUNCTION__, Name.Name);
 }
 
 void FJsonOutputArchiveFormatter::LeaveField()
@@ -72,46 +53,39 @@ void FJsonOutputArchiveFormatter::LeaveField()
 	FStackObject& Current = GetCurrent();
 	check(!Current.Field.IsEmpty());
 
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s"), *Tabber(Stack.Num()), __FUNCTION__, *Current.Field);
 	Current.bInAttributedValueValue = false;
 	Current.Field.Reset();
 }
 
 bool FJsonOutputArchiveFormatter::TryEnterField(FArchiveFieldName Name, bool bEnterWhenWriting)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s"), *Tabber(Stack.Num()), __FUNCTION__, Name.Name);
 	EnterField(Name);
 	return true;
 }
 
 void FJsonOutputArchiveFormatter::EnterArray(int32& NumElements)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %d"), *Tabber(Stack.Num()), __FUNCTION__, NumElements);
 	GetCurrent().StreamValues.Reserve(NumElements);
 	EnterStream();
 }
 
 void FJsonOutputArchiveFormatter::LeaveArray()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	LeaveStream();
 }
 
 void FJsonOutputArchiveFormatter::EnterArrayElement()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	EnterStreamElement();
 }
 
 void FJsonOutputArchiveFormatter::LeaveArrayElement()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	LeaveStreamElement();
 }
 
 void FJsonOutputArchiveFormatter::EnterStream()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	FStackObject& Current = GetCurrent();
 	Current.bInStream = true;
 }
@@ -122,84 +96,70 @@ void FJsonOutputArchiveFormatter::LeaveStream()
 	Current.bInStream = false;
 	Current.Object->SetArrayField(Current.Field, Current.StreamValues);
 	Current.StreamValues.Reset();
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterStreamElement()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::LeaveStreamElement()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterMap(int32& NumElements)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %i"), *Tabber(Stack.Num()), __FUNCTION__, NumElements);
 	EnterRecord();
 }
 
 void FJsonOutputArchiveFormatter::LeaveMap()
 {
 	LeaveRecord();
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterMapElement(FString& Name)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	EnterField(*Name);
 }
 
 void FJsonOutputArchiveFormatter::LeaveMapElement()
 {
 	LeaveField();
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterAttributedValue()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	EnterRecord();
 }
 
 void FJsonOutputArchiveFormatter::LeaveAttributedValue()
 {
 	LeaveRecord();
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterAttribute(FArchiveFieldName AttributeName)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	EnterField(AttributeName);
 }
 
 void FJsonOutputArchiveFormatter::LeaveAttribute()
 {
 	LeaveField();
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 }
 
 void FJsonOutputArchiveFormatter::EnterAttributedValueValue()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	GetCurrent().bInAttributedValueValue = true;
 	EnterField(FArchiveFieldName(TEXT("_Value")));
 }
 
 bool FJsonOutputArchiveFormatter::TryEnterAttribute(FArchiveFieldName AttributeName, bool bEnterWhenWriting)
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s"), *Tabber(Stack.Num()), __FUNCTION__, AttributeName.Name);
 	EnterField(AttributeName);
 	return true;
 }
 
 bool FJsonOutputArchiveFormatter::TryEnterAttributedValueValue()
 {
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs"), *Tabber(Stack.Num()), __FUNCTION__);
 	EnterAttributedValueValue();
 	return true;
 }
@@ -316,20 +276,7 @@ void FJsonOutputArchiveFormatter::Serialize(void* Data, uint64 DataSize)
 
 void FJsonOutputArchiveFormatter::Serialize(const TSharedRef<FJsonObject>& Value)
 {
-	FStackObject& Current = GetCurrent();
-
-	// Replace the current record
-	check(Current.Object->Values.Num() == 0);
-	Current.Object = Value;
-
-	if (Stack.Num() > 1)
-	{
-		// We've got a parent, ensure its field is replaced with the new object
-		FStackObject& Parent = Stack.Last(1);
-
-		check(!Parent.Field.IsEmpty());
-		Parent.Object->SetObjectField(Parent.Field, Value);
-	}
+	SetValue(MakeShared<FJsonValueObject>(Value));
 }
 
 void FJsonOutputArchiveFormatter::Serialize(const UObject* Value)
@@ -361,7 +308,6 @@ void FJsonOutputArchiveFormatter::SetValue(const TSharedRef<FJsonValue>& Value)
 	FStackObject& Current = GetCurrent();
 	check(!Current.Field.IsEmpty());
 
-	UE_LOG(LogJsonOutputArchiveFormatter, Verbose, TEXT("%s%hs: %s = %s"), *Tabber(Stack.Num()), __FUNCTION__, *Current.Field, *Value->AsString());
 
 	if (Current.bInStream)
 	{

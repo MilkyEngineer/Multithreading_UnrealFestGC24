@@ -8,7 +8,7 @@ class FProxyArchiveFormatter : public FStructuredArchiveFormatter
 {
 public:
 	FProxyArchiveFormatter(FStructuredArchiveFormatter& InPrimary, FStructuredArchiveFormatter& InSecondary);
-	
+
 	virtual FArchive& GetUnderlyingArchive() override;
 	virtual bool HasDocumentTree() const override;
 	virtual void EnterRecord() override;
@@ -59,6 +59,7 @@ public:
 	virtual void Serialize(void* Data, uint64 DataSize) override;
 
 protected:
+	int32 StackDepth;
 	FStructuredArchiveFormatter& Primary;
 	FStructuredArchiveFormatter* Secondary;
 };

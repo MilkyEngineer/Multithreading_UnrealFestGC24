@@ -20,15 +20,20 @@ public:
 		WorkQueue.Push(new FTaskFunction(Task));
 	}
 
-	void ProcessThread()
+	bool ProcessThread()
 	{
 		check(ThreadId == FPlatformTLS::GetCurrentThreadId());
+
+		bool bDidWork = false;
 
 		while (const FTaskFunction* Function = WorkQueue.Pop())
 		{
 			(*Function)();
 			delete Function;
+			bDidWork = true;
 		}
+
+		return bDidWork;
 	}
 
 	bool IsComplete() const { return WorkQueue.IsEmpty(); }
@@ -58,7 +63,7 @@ FSaveGameTheadScope::~FSaveGameTheadScope()
 	GSaveGameThreadQueue.Reset();
 }
 
-void FSaveGameTheadScope::ProcessThread() const
+bool FSaveGameTheadScope::ProcessThread() const
 {
-	GSaveGameThreadQueue->ProcessThread();
+	return GSaveGameThreadQueue->ProcessThread();
 }

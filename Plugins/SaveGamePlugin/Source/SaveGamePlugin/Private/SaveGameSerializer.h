@@ -54,6 +54,8 @@ public:
 	virtual UE::Tasks::FTask DoOperation() override;
 
 private:
+	struct FActorInfo;
+
 	static FString GetSaveName();
 
 	void SerializeVersionOffset();
@@ -68,6 +70,11 @@ private:
 	 */
 	void SerializeActors();
 
+	void InitializeActor(int32 ActorIdx);
+	void SerializeActor(int32 ActorIdx);
+
+	void MergeSaveData();
+
 	/** Serializes any destroyed level actors. On load, level actors will exist again, so this will re-destroy them */
 	void SerializeDestroyedActors();
 
@@ -77,14 +84,20 @@ private:
 	 */
 	void SerializeVersions();
 
-private:
 	USaveGameSubsystem* Subsystem;
 	TArray<uint8> Data;
 	TSaveGameMemoryArchive Archive;
 	TMap<FSoftObjectPath, FSoftObjectPath> Redirects;
 	TSaveGameArchive<bIsLoading>* SaveArchive;
 
-	FString MapName;
-	uint64 VersionOffset;
-};
+	FTopLevelAssetPath LevelAssetPath;
+	TArray<uint64> ActorOffsets;
+	TArray<TWeakObjectPtr<AActor>> SaveGameActors;
+	TArray<FActorInfo> ActorData;
+	TMap<FGuid, TWeakObjectPtr<AActor>> SpawnIDs;
 
+	FString MapName;
+	uint64 ActorOffsetsOffset;
+	uint64 VersionOffset;
+	uint64 ActorsOffset;
+};

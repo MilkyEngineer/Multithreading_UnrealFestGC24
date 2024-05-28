@@ -9,7 +9,9 @@
 #include "SaveGameVersion.h"
 #include "SaveGameProxyArchive.h"
 #include "TaskHelpers.inl"
+#include "Formatters/NullArchiveFormatter.h"
 
+constexpr bool bForceSingleThreaded = true;
 #define USE_TEXT_FORMATTER WITH_TEXT_ARCHIVE_SUPPORT
 
 #if USE_TEXT_FORMATTER
@@ -31,8 +33,9 @@ using namespace UE::Tasks;
 class FSaveGameArchiveFormatter : public FProxyArchiveFormatter
 {
 public:
-	FSaveGameArchiveFormatter(FArchive& InnerArchive)
-		: FProxyArchiveFormatter(BinaryFormatter, JsonFormatter)
+	FSaveGameArchiveFormatter(FArchive& InnerArchive, bool bUseNull)
+		: FProxyArchiveFormatter(BinaryFormatter,
+			static_cast<FStructuredArchiveFormatter&>(bUseNull ? FNullArchiveFormatter::Get() : JsonFormatter))
 		, BinaryFormatter(InnerArchive)
 	{}
 
@@ -44,23 +47,37 @@ public:
 template<bool bIsLoading>
 class TSaveGameArchive
 {
-	typedef typename TChooseClass<!bIsLoading && USE_TEXT_FORMATTER,
-		class FSaveGameArchiveFormatter, FBinaryArchiveFormatter>::Result FSaveGameFormatter;
+	using FSaveGameFormatter =
+		typename TChooseClass<USE_TEXT_FORMATTER, class FSaveGameArchiveFormatter, FBinaryArchiveFormatter>::Result;
 
 public:
 	TSaveGameArchive(FArchive& InArchive, TMap<FSoftObjectPath, FSoftObjectPath>& InRedirects)
 		: ProxyArchive(InArchive, InRedirects)
-		, Formatter(ProxyArchive)
-		, StructuredArchive(Formatter)
-		, RootSlot(StructuredArchive.Open())
-		, RootRecord(RootSlot.EnterRecord())
+		, Formatter(ProxyArchive, bIsLoading)
+		, ArchiveData(nullptr)
 	{}
 
-	FStructuredArchive::FRecord& GetRecord() { return RootRecord; }
+	~TSaveGameArchive()
+	{
+		checkf(ArchiveData == nullptr, TEXT("Be sure to manually close archive!"));
+	}
+
+	FStructuredArchive::FRecord& GetRecord()
+	{
+		if (ArchiveData == nullptr)
+		{
+			ArchiveData = new FStructuredArchiveData(Formatter);
+		}
+		return ArchiveData->RootRecord;
+	}
 
 	void Close()
 	{
-		StructuredArchive.Close();
+		if (ArchiveData)
+		{
+			delete ArchiveData;
+			ArchiveData = nullptr;
+		}
 	}
 
 	void ConsolidateVersions(TSaveGameArchive& Other)
@@ -93,9 +110,21 @@ public:
 	FSaveGameFormatter Formatter;
 
 private:
-	FStructuredArchive StructuredArchive;
-	FStructuredArchive::FSlot RootSlot;
-	FStructuredArchive::FRecord RootRecord;
+	struct FStructuredArchiveData
+	{
+		FStructuredArchiveData(FStructuredArchiveFormatter& InFormatter)
+			: StructuredArchive(InFormatter)
+			, RootSlot(StructuredArchive.Open())
+			, RootRecord(RootSlot.EnterRecord())
+		{
+		}
+
+		FStructuredArchive StructuredArchive;
+		FStructuredArchive::FSlot RootSlot;
+		FStructuredArchive::FRecord RootRecord;
+	};
+
+	FStructuredArchiveData* ArchiveData;
 };
 
 template<bool bLoading>
@@ -121,14 +150,50 @@ FORCEINLINE_DEBUGGABLE void SerializeCompressedData(FArchive& Ar, TArray<uint8>&
 }
 
 template <bool bIsLoading>
+struct TSaveGameSerializer<bIsLoading>::FActorInfo
+{
+	~FActorInfo()
+	{
+		if (Archive)
+		{
+			delete Archive;
+			Archive = nullptr;
+		}
+
+		if (MemoryArchive)
+		{
+			delete MemoryArchive;
+			MemoryArchive = nullptr;
+		}
+	}
+
+	void CreateArchive(TArray<uint8>& InData, TMap<FSoftObjectPath, FSoftObjectPath>& InRedirects)
+	{
+		MemoryArchive = new TSaveGameMemoryArchive(InData);
+		Archive = new TSaveGameArchive<bIsLoading>(*MemoryArchive, InRedirects);
+	}
+
+	TWeakObjectPtr<AActor> Actor;
+	FString Name;
+
+	TArray<uint8> Data;
+	TSaveGameArchive<bIsLoading>* Archive = nullptr;
+
+private:
+	FArchive* MemoryArchive = nullptr;
+};
+
+template <bool bIsLoading>
 TSaveGameSerializer<bIsLoading>::TSaveGameSerializer(USaveGameSubsystem* InSubsystem)
 	: Subsystem(InSubsystem)
 	, Archive(Data)
 	, SaveArchive(new TSaveGameArchive<bIsLoading>(Archive, Redirects))
+	, ActorOffsetsOffset(0)
 	, VersionOffset(0)
+	, ActorsOffset(0)
 {
 	// Ensure that we're using the latest save game version
-	SaveArchive->GetArchive().UsingCustomVersion(FSaveGameVersion::GUID);
+	Archive.UsingCustomVersion(FSaveGameVersion::GUID);
 }
 
 template <bool bIsLoading>
@@ -149,7 +214,8 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 			PreviousTask = Launch(UE_SOURCE_LOCATION, [this, SaveSystem]
 			{
 				TArray<uint8> CompressedData;
-				SaveSystem->LoadGame(false, *GetSaveName(), 0, CompressedData);
+				const bool bLoaded = SaveSystem->LoadGame(false, *GetSaveName(), 0, CompressedData);
+				check(bLoaded);
 
 				// Decompress the loaded save game data
 				TSaveGameMemoryArchive CompressorArchive(CompressedData);
@@ -165,22 +231,9 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 
 		if (bIsLoading)
 		{
-			PreviousTask = Launch(UE_SOURCE_LOCATION, [this]
-			{
-				const uint64 InitialPosition = Archive.Tell();
-
-				// After serializing versions, go back to initial position
-				ON_SCOPE_EXIT
-				{
-					Archive.Seek(InitialPosition);
-				};
-
-				Archive.Seek(VersionOffset);
-				SerializeVersions();
-			}, PreviousTask);
+			PreviousTask = Launch(UE_SOURCE_LOCATION, [this] { SerializeVersions(); }, PreviousTask);
 
 			FTaskEvent MapLoadEvent(TEXT("MapLoaded"));
-
 			LaunchGameThread(UE_SOURCE_LOCATION, [this, MapLoadEvent]() mutable
 			{
 				UWorld* World = Subsystem->GetWorld();
@@ -206,21 +259,25 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 
 		PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this]
 		{
-			SerializeActors();
 			SerializeDestroyedActors();
+			SerializeActors();
 		}, PreviousTask);
+
+		if (!bIsLoading)
+		{
+			PreviousTask = Launch(UE_SOURCE_LOCATION, [this]
+			{
+				MergeSaveData();
+				SerializeVersions();
+
+				// Go back to the start to override the original version offset
+				Archive.Seek(0);
+				SerializeVersionOffset();
+			}, PreviousTask);
+		}
 
 		PreviousTask = Launch(UE_SOURCE_LOCATION, [this]
 		{
-			if (!bIsLoading)
-			{
-				SerializeVersions();
-
-				// We've updated the VersionOffset, let's go back to the start and rewrite the header
-				SaveArchive->GetArchive().Seek(0);
-				SerializeVersionOffset();
-			}
-
 			SaveArchive->Close();
 		}, PreviousTask);
 
@@ -295,8 +352,8 @@ void TSaveGameSerializer<bIsLoading>::SerializeHeader()
 
 	if (bIsLoading)
 	{
-		SaveArchive->GetArchive().SetEngineVer(EngineVersion);
-		SaveArchive->GetArchive().SetUEVer(PackageVersion);
+		Archive.SetEngineVer(EngineVersion);
+		Archive.SetUEVer(PackageVersion);
 	}
 
 	// If we already have a map name, don't change it
@@ -308,6 +365,42 @@ void TSaveGameSerializer<bIsLoading>::SerializeHeader()
 	Record << SA_VALUE(TEXT("Map"), MapName);
 }
 
+void ExecuteJobs(const int32 NumJobs, TFunction<void(int32)> Job)
+{
+	FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundNormal);
+	FSaveGameTheadScope GameThreadScope;
+	TAtomic<uint32> CompletedJobs = 0;
+
+	for (int32 ActorIdx = 0; ActorIdx < NumJobs; ++ActorIdx)
+	{
+		auto DoJob = [ActorIdx, &CompletedJobs, &Job](uint32)
+		{
+			Job(ActorIdx);
+			++CompletedJobs;
+		};
+
+		if (bForceSingleThreaded)
+		{
+			DoJob(ActorIdx);
+		}
+		else
+		{
+			ConcurrencyLimiter.Push(UE_SOURCE_LOCATION, DoJob);
+		}
+	}
+
+	if (!bForceSingleThreaded)
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
+
+		// Pump the Work Queue on the game thread
+		while (GameThreadScope.ProcessThread() || CompletedJobs.Load() != NumJobs)
+		{
+			FPlatformProcess::YieldCycles(10000);
+		}
+	}
+}
+
 template<bool bIsLoading>
 void TSaveGameSerializer<bIsLoading>::SerializeActors()
 {
@@ -317,47 +410,10 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 	check(IsInGameThread());
 
 	// This serialize method assumes that we don't have any streamed/sub levels
-	UWorld* World = Subsystem->GetWorld();
-	const FTopLevelAssetPath LevelAssetPath(World->GetCurrentLevel()->GetPackage()->GetFName(), World->GetCurrentLevel()->GetOuter()->GetFName());
-	FTask PreviousTask;
+	const UWorld* World = Subsystem->GetWorld();
+	LevelAssetPath = FTopLevelAssetPath(World->GetCurrentLevel()->GetPackage()->GetFName(), World->GetCurrentLevel()->GetOuter()->GetFName());
 
-	struct FActorInfo
-	{
-		~FActorInfo()
-		{
-			if (Archive)
-			{
-				delete Archive;
-				Archive = nullptr;
-			}
-
-			if (MemoryArchive)
-			{
-				delete MemoryArchive;
-				MemoryArchive = nullptr;
-			}
-		}
-
-		void CreateArchive(TArray<uint8>& InData, TMap<FSoftObjectPath, FSoftObjectPath>& InRedirects)
-		{
-			MemoryArchive = new TSaveGameMemoryArchive(InData);
-			Archive = new TSaveGameArchive<bIsLoading>(*MemoryArchive, InRedirects);
-		}
-
-		TWeakObjectPtr<AActor> Actor;
-		FString Name;
-		uint64 DataSize = UINT64_MAX;
-
-		TArray<uint8> Data;
-		TSaveGameArchive<bIsLoading>* Archive = nullptr;
-
-	private:
-		FArchive* MemoryArchive = nullptr;
-	};
-
-	TMap<FGuid, AActor*> SpawnIDs;
-	TArray<FActorInfo> ActorData;
-	TArray<TWeakObjectPtr<AActor>> SaveGameActors = Subsystem->SaveGameActors.Array();
+	SaveGameActors = Subsystem->SaveGameActors.Array();
 	int32 NumActors = SaveGameActors.Num();
 
 	if (bIsLoading)
@@ -380,255 +436,244 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 		}
 	}
 
-	constexpr TCHAR DataSizeName[] = TEXT("DataSize");
-	FStructuredArchive::FMap ActorMap = SaveArchive->GetRecord().EnterMap(TEXT("Actors"), NumActors);
+	ActorOffsets.SetNumZeroed(NumActors);
+	ActorOffsetsOffset = Archive.Tell();
+	Archive << ActorOffsets;
 
-	constexpr bool bForceSingleThreaded = false;
-	FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundNormal);
+	// We do this as in a load game, we will have the number of actors from the actor offets
+	NumActors = ActorOffsets.Num();
+	SaveGameActors.SetNumZeroed(NumActors);
+	ActorData.SetNumZeroed(NumActors);
 
+	ActorsOffset = Archive.Tell();
+	FStructuredArchive::FStream ActorStream = SaveArchive->GetRecord().EnterStream(TEXT("Actors"));
+
+	// Need to init actors first for the sake of populating redirects before serialization
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_InitializeActors);
 
-		TAtomic<uint32> CompletedJobs = 0;
-		ActorData.SetNumZeroed(NumActors);
-
-		// Iterate through the saved actors and spawn or find their live equivalent
-		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
-		{
-			auto InitActor = [&, ActorIdx](uint32)
-			{
-				FSoftClassPath Class;
-				FGuid SpawnID;
-				FActorInfo& ActorInfo = ActorData[ActorIdx];
-				TWeakObjectPtr<AActor>& Actor = ActorInfo.Actor;
-
-				const FString EventStr = FString::Printf(TEXT("Actor: %i"), ActorIdx);
-				SCOPED_NAMED_EVENT_FSTRING(EventStr, FColor::Red);
-
-				if (bIsLoading)
-				{
-					// For saving, need to do this later
-					FStructuredArchive::FSlot ActorSlot = ActorMap.EnterElement(ActorInfo.Name);
-					ActorSlot.EnterRecord().EnterField(DataSizeName) << ActorInfo.DataSize;
-
-					// When loading, we already have the data, so reuse our current data
-					ActorInfo.CreateArchive(Data, Redirects);
-					ActorInfo.Archive->GetArchive().Seek(SaveArchive->GetArchive().Tell());
-					ActorInfo.Archive->ConsolidateVersions(*SaveArchive);
-				}
-				else
-				{
-					ActorInfo.Actor = SaveGameActors[ActorIdx].Get();
-					ActorInfo.Name = ActorInfo.Actor->GetName();
-
-					// When saving, we need to dump the data into
-					ActorInfo.CreateArchive(ActorInfo.Data, Redirects);
-
-					if (!USaveGameFunctionLibrary::WasObjectLoaded(Actor.Get()))
-					{
-						// We're a spawned actor, stash the class
-						Class = Actor->GetClass();
-					}
-
-					if (Actor->Implements<USaveGameSpawnActor>())
-					{
-						SpawnID = ISaveGameSpawnActor::Execute_GetSpawnID(Actor.Get());
-					}
-				}
-
-				const uint64 ActorStartPosition = bIsLoading ? SaveArchive->GetArchive().Tell() : UINT64_MAX;
-
-				FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
-
-				ensureAlways(!ActorInfo.Name.IsEmpty());
-
-				// If we have a class, we're a spawned actor
-				if (TOptional<FStructuredArchive::FSlot> ClassSlot = Record.TryEnterField(TEXT("Class"), !Class.IsNull()))
-				{
-					ClassSlot.GetValue() << Class;
-				}
-
-				// If we have a GUID, we're a spawn actor that needs to be mapped by GUID
-				if (TOptional<FStructuredArchive::FSlot> GuidSlot = Record.TryEnterField(TEXT("GUID"), SpawnID.IsValid()))
-				{
-					GuidSlot.GetValue() << SpawnID;
-				}
-
-				if (bIsLoading)
-				{
-					if (Class.IsNull())
-					{
-						// This is a loaded actor (is a level actor), let's find it
-						Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
-					}
-					else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
-					{
-						Actor = SpawnIDs[SpawnID];
-					}
-					else
-					{
-						UClass* ActorClass = Class.TryLoadClass<AActor>();
-
-						// This is a spawned actor, let's spawn it
-						FActorSpawnParameters SpawnParameters;
-
-						// If we were handling levels, specify it here
-						SpawnParameters.OverrideLevel = World->GetCurrentLevel();
-						SpawnParameters.Name = *ActorInfo.Name;
-						SpawnParameters.bNoFail = true;
-
-						Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
-
-						if (SpawnID.IsValid() && Actor->Implements<USaveGameSpawnActor>())
-						{
-							ISaveGameSpawnActor::Execute_SetSpawnID(Actor.Get(), SpawnID);
-						}
-					}
-
-					if (SpawnID.IsValid())
-					{
-						const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
-
-						// We potentially have a spawned actor that other actors reference
-						// If the name has changed, be sure to redirect the old actor path to the new one
-						ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(Actor.Get()));
-					}
-
-					// Ensure we have an initialized data size
-					check(ActorInfo.DataSize != UINT64_MAX);
-
-					// As we'll be deferring serialization, we need to skip over to the next actor
-					SaveArchive->GetArchive().Seek(ActorStartPosition + ActorInfo.DataSize);
-				}
-
-				++CompletedJobs;
-			};
-
-			if (bIsLoading || bForceSingleThreaded)
-			{
-				InitActor(ActorIdx);
-			}
-			else
-			{
-				ConcurrencyLimiter.Push(UE_SOURCE_LOCATION, InitActor);
-			}
-		}
-
-		ConcurrencyLimiter.Wait();
-
-		const uint32 NumCompleted = CompletedJobs.Load();
-		checkf(NumCompleted == NumActors, TEXT("Completed only %i of %i jobs!"), NumCompleted, NumActors);
+		ExecuteJobs(NumActors, [this] (int32 ActorIdx) { InitializeActor(ActorIdx); });
 	}
 
 	// Actually do the serialization of each actor (now that we've updated redirects)
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_Serialize);
 
-		FSaveGameTheadScope GameThreadScope;
-		TAtomic<uint32> CompletedJobs = 0;
+		ExecuteJobs(NumActors, [this] (int32 ActorIdx) { SerializeActor(ActorIdx); });
+	}
 
-		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
+	if (bIsLoading)
+	{
+		for (FActorInfo& ActorInfo : ActorData)
 		{
-			auto SerializeLambda = [&CompletedJobs, &ActorData, ActorIdx](uint32)
+			ActorInfo.Archive->Close();
+		}
+	}
+}
+
+template <bool bIsLoading>
+void TSaveGameSerializer<bIsLoading>::InitializeActor(int32 ActorIdx)
+{
+	const FString EventStr = FString::Printf(TEXT("InitializeActor: %i"), ActorIdx);
+	SCOPED_NAMED_EVENT_FSTRING(EventStr, FColor::Red);
+
+	FSoftClassPath Class;
+	FGuid SpawnID;
+	FActorInfo& ActorInfo = ActorData[ActorIdx];
+
+	if (bIsLoading)
+	{
+		// When loading, we already have the data, so reuse our current data
+		ActorInfo.CreateArchive(Data, Redirects);
+		ActorInfo.Archive->GetArchive().Seek(ActorOffsets[ActorIdx]);
+		ActorInfo.Archive->ConsolidateVersions(*SaveArchive);
+	}
+	else
+	{
+		AActor* Actor = SaveGameActors[ActorIdx].Get();
+		ActorInfo.Actor = Actor;
+		ActorInfo.Name = Actor->GetName();
+
+		// When saving, we need to dump the data into
+		ActorInfo.CreateArchive(ActorInfo.Data, Redirects);
+
+		if (!USaveGameFunctionLibrary::WasObjectLoaded(ActorInfo.Actor.Get()))
+		{
+			// We're a spawned actor, stash the class
+			Class = Actor->GetClass();
+		}
+
+		if (Actor->Implements<USaveGameSpawnActor>())
+		{
+			SpawnID = ISaveGameSpawnActor::Execute_GetSpawnID(Actor);
+		}
+	}
+
+	FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
+
+	Record.EnterField(TEXT("Name")) << ActorInfo.Name;
+
+	ensureAlways(!ActorInfo.Name.IsEmpty());
+
+	// If we have a class, we're a spawned actor
+	if (TOptional<FStructuredArchive::FSlot> ClassSlot = Record.TryEnterField(TEXT("Class"), !Class.IsNull()))
+	{
+		ClassSlot.GetValue() << Class;
+	}
+
+	// If we have a GUID, we're a spawn actor that needs to be mapped by GUID
+	if (TOptional<FStructuredArchive::FSlot> GuidSlot = Record.TryEnterField(TEXT("GUID"), SpawnID.IsValid()))
+	{
+		GuidSlot.GetValue() << SpawnID;
+	}
+
+	if (bIsLoading)
+	{
+		ISaveGameThreadQueue::FTaskFunction SpawnOrGetActor = [this, ActorIdx, Class, SpawnID]
+		{
+			UWorld* World = Subsystem->GetWorld();
+			FActorInfo& ActorInfo = ActorData[ActorIdx];
+			TWeakObjectPtr<AActor>& Actor = ActorInfo.Actor;
+
+			if (Class.IsNull())
 			{
-				check(bForceSingleThreaded || !IsInGameThread());
+				ensureAlways(!ActorInfo.Name.IsEmpty());
 
-				QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SerializeScriptProperties);
-
-				FActorInfo& ActorInfo = ActorData[ActorIdx];
-				AActor* Actor = ActorInfo.Actor.Get();
-				FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
-
-				// Since we have control of the game thread, we should be pretty safe to serialize our properties
-				Actor->SerializeScriptProperties(Record.EnterField(TEXT("Properties")));
-
-				ISaveGameThreadQueue::FTaskFunction CallOnSerialize = [&CompletedJobs, &ActorInfo]
-				{
-					QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_OnSerialize);
-
-					AActor* Actor = ActorInfo.Actor.Get();
-					FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
-					FStructuredArchive::FSlot CustomDataSlot = Record.EnterField(TEXT("Data"));
-					FStructuredArchive::FRecord CustomDataRecord = CustomDataSlot.EnterRecord();
-
-					// Encapsulate the record in something a Blueprint can access
-					FSaveGameArchive SaveGameArchive(CustomDataRecord, Actor);
-
-					ISaveGameObject::Execute_OnSerialize(Actor, SaveGameArchive, bIsLoading);
-
-					++CompletedJobs;
-				};
-
-				if (bForceSingleThreaded || ISaveGameObject::Execute_IsThreadSafe(Actor))
-				{
-					CallOnSerialize();
-				}
-				else
-				{
-					// We're not threadsafe, queue up this actor to the game thread
-					ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(CallOnSerialize));
-				}
-			};
-
-			if (bForceSingleThreaded)
+				// This is a loaded actor (is a level actor), let's find it
+				Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
+			}
+			else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
 			{
-				SerializeLambda(ActorIdx);
+				Actor = SpawnIDs[SpawnID];
 			}
 			else
 			{
-				ConcurrencyLimiter.Push(UE_SOURCE_LOCATION, SerializeLambda);
+				UClass* ActorClass = Class.TryLoadClass<AActor>();
+
+				ensureAlways(!ActorInfo.Name.IsEmpty());
+				ensureAlways(ActorClass);
+
+				// This is a spawned actor, let's spawn it
+				FActorSpawnParameters SpawnParameters;
+
+				// If we were handling levels, specify it here
+				SpawnParameters.OverrideLevel = World->GetCurrentLevel();
+				SpawnParameters.Name = *ActorInfo.Name;
+				SpawnParameters.bNoFail = true;
+
+				Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
+
+				if (SpawnID.IsValid() && Actor->Implements<USaveGameSpawnActor>())
+				{
+					ISaveGameSpawnActor::Execute_SetSpawnID(Actor.Get(), SpawnID);
+				}
 			}
-		}
 
-		if (!bForceSingleThreaded)
-		{
-			QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
+			check(Actor.IsValid());
+			SaveGameActors[ActorIdx] = Actor;
 
-			// Pump the Work Queue on the game thread
-			GameThreadScope.ProcessThread();
-			while (CompletedJobs.Load() != NumActors)
+			if (SpawnID.IsValid())
 			{
-				FPlatformProcess::YieldCycles(10000);
-				GameThreadScope.ProcessThread();
+				const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
+
+				// We potentially have a spawned actor that other actors reference
+				// If the name has changed, be sure to redirect the old actor path to the new one
+				ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(Actor.Get()));
 			}
+		};
+
+		if (bForceSingleThreaded)
+		{
+			SpawnOrGetActor();
+		}
+		else
+		{
+			ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(SpawnOrGetActor));
 		}
 	}
+}
 
-	if (!bIsLoading)
+template <bool bIsLoading>
+void TSaveGameSerializer<bIsLoading>::SerializeActor(int32 ActorIdx)
+{
+	check(bForceSingleThreaded || !IsInGameThread());
+
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SerializeScriptProperties);
+
+	FActorInfo& ActorInfo = ActorData[ActorIdx];
+	const AActor* Actor = ActorInfo.Actor.Get();
+	FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
+
+	// Since we have control of the game thread, we should be pretty safe to serialize our properties
+	Actor->SerializeScriptProperties(Record.EnterField(TEXT("Properties")));
+
+	ISaveGameThreadQueue::FTaskFunction CallOnSerialize = [this, ActorIdx]
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_MergeThreadData);
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_OnSerialize);
 
-		// Merge each actor's save data
-		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
-		{
-			FActorInfo& ActorInfo = ActorData[ActorIdx];
+		FActorInfo& ActorInfo = ActorData[ActorIdx];
+		AActor* Actor = ActorInfo.Actor.Get();
+		FStructuredArchive::FRecord& Record = ActorInfo.Archive->GetRecord();
+		FStructuredArchive::FSlot CustomDataSlot = Record.EnterField(TEXT("Data"));
+		FStructuredArchive::FRecord CustomDataRecord = CustomDataSlot.EnterRecord();
 
-			SaveArchive->ConsolidateVersions(*ActorInfo.Archive);
+		// Encapsulate the record in something a Blueprint can access
+		FSaveGameArchive SaveGameArchive(CustomDataRecord, Actor);
 
-			FStructuredArchive::FSlot ActorSlot = ActorMap.EnterElement(ActorInfo.Name);
-			FStructuredArchive::FRecord ActorRecord = ActorSlot.EnterRecord();
+		ISaveGameObject::Execute_OnSerialize(Actor, SaveGameArchive, bIsLoading);
+	};
+
+	if (bForceSingleThreaded || ISaveGameObject::Execute_IsThreadSafe(Actor))
+	{
+		CallOnSerialize();
+	}
+	else
+	{
+		// We're not threadsafe, queue up this actor to the game thread
+		ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(CallOnSerialize));
+	}
+}
+
+template <bool bIsLoading>
+void TSaveGameSerializer<bIsLoading>::MergeSaveData()
+{
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_MergeThreadData);
+
+	Archive.Seek(ActorsOffset);
+	FStructuredArchive::FStream ActorStream = SaveArchive->GetRecord().EnterStream(TEXT("Actors"));
+
+	// Merge each actor's save data
+	for (int32 ActorIdx = 0; ActorIdx < ActorData.Num(); ++ActorIdx)
+	{
+		FActorInfo& ActorInfo = ActorData[ActorIdx];
+
+		ActorInfo.Archive->Close();
+		SaveArchive->ConsolidateVersions(*ActorInfo.Archive);
+
+		FStructuredArchive::FSlot StreamElement = ActorStream.EnterElement();
 
 #if USE_TEXT_FORMATTER
-			// Merge our JSON structure into the main Save Game archive's
-			FSaveGameArchiveFormatter& Formatter = reinterpret_cast<FSaveGameArchiveFormatter&>(SaveArchive->Formatter);
-			Formatter.JsonFormatter.Serialize(reinterpret_cast<FSaveGameArchiveFormatter&>(ActorInfo.Archive->Formatter).JsonFormatter.GetRoot());
+		// Merge our JSON structure into the main Save Game archive's
+		FSaveGameArchiveFormatter& Formatter = reinterpret_cast<FSaveGameArchiveFormatter&>(SaveArchive->Formatter);
+		Formatter.JsonFormatter.Serialize(reinterpret_cast<FSaveGameArchiveFormatter&>(ActorInfo.Archive->Formatter).JsonFormatter.GetRoot());
 #endif
 
-			const uint64 DataSizePosition = SaveArchive->GetArchive().Tell();
-			ActorRecord.EnterField(DataSizeName) << ActorInfo.DataSize;
-			const uint64 PostDataSizePosition = SaveArchive->GetArchive().Tell();
+		Archive.Seek(Data.Num());
 
-			// We are appending the data, as serialising will prepend data on the length of the array
-			Data.Append(ActorInfo.Data);
+		uint64 DataSize = ActorInfo.Data.Num();
+		StreamElement.EnterAttribute(TEXT("DataSize")) << DataSize;
 
-			// Update our data size and then skip
-			const uint64 PreviousPosition = Data.Num();
-			SaveArchive->GetArchive().Seek(DataSizePosition);
-			ActorInfo.DataSize = ActorInfo.Data.Num();
-			ActorRecord.EnterField(DataSizeName) << ActorInfo.DataSize;
-			SaveArchive->GetArchive().Seek(PreviousPosition);
-		}
+		ActorOffsets[ActorIdx] = Data.Num();
+
+		// We are appending the data, as serialising will prepend data on the length of the array
+		Data.Append(ActorInfo.Data);
 	}
+
+	ActorData.Empty();
+
+	Archive.Seek(ActorOffsetsOffset);
+	Archive << ActorOffsets;
+	Archive.Seek(Data.Num());
 }
 
 template <bool bIsLoading>
@@ -636,6 +681,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeDestroyedActors()
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SerializeDestroyedActors);
 
+	check(IsInGameThread());
 	const UWorld* World = Subsystem->GetWorld();
 
 	int32 NumDestroyedActors;
@@ -689,14 +735,18 @@ void TSaveGameSerializer<bIsLoading>::SerializeVersions()
 {
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SerializeVersions);
 
-	VersionOffset = SaveArchive->GetArchive().Tell();
-
+	const uint64 InitialPosition = Archive.Tell();
 	FCustomVersionContainer VersionContainer;
 
-	if (!bIsLoading)
+	if (bIsLoading)
+	{
+		Archive.Seek(VersionOffset);
+	}
+	else
 	{
 		// Grab a copy of our archive's current versions
-		VersionContainer = SaveArchive->GetArchive().GetCustomVersions();
+		VersionContainer = Archive.GetCustomVersions();
+		VersionOffset = Archive.Tell();
 	}
 
 	VersionContainer.Serialize(SaveArchive->GetRecord().EnterField(TEXT("Versions")));
@@ -704,7 +754,10 @@ void TSaveGameSerializer<bIsLoading>::SerializeVersions()
 	if (bIsLoading)
 	{
 		// Assign our serialized versions
-		SaveArchive->GetArchive().SetCustomVersions(VersionContainer);
+		Archive.SetCustomVersions(VersionContainer);
+
+		// After serializing versions, go back to initial position
+		Archive.Seek(InitialPosition);
 	}
 }
 

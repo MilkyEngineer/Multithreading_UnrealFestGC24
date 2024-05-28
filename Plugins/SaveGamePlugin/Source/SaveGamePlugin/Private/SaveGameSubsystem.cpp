@@ -8,6 +8,8 @@
 
 #include "EngineUtils.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogSaveGameSubsystem, Log, All);
+
 using namespace UE::Tasks;
 
 void USaveGameSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -35,38 +37,44 @@ void USaveGameSubsystem::Deinitialize()
 
 void USaveGameSubsystem::Save()
 {
+	constexpr TCHAR RegionName[] = TEXT("SaveGame[Save]");
+	UE_LOG(LogSaveGameSubsystem, Log, TEXT("%s: Begin"), RegionName);
+	TRACE_BEGIN_REGION(RegionName);
+
 	TSharedPtr<TSaveGameSerializer<false>> Serializer = MakeShared<TSaveGameSerializer<false>>(this);
 
 	SaveGamePipe.Launch(UE_SOURCE_LOCATION, [this, Serializer]
 	{
-		constexpr TCHAR RegionName[] = TEXT("SaveGame[Save]");
-		TRACE_BEGIN_REGION(RegionName);
-
 		FTask Previous = Serializer->DoOperation();
 
 		// This will also keep the Serializer alive until we're complete
-		AddNested(Launch(UE_SOURCE_LOCATION, [Serializer]
+		AddNested(Launch(UE_SOURCE_LOCATION, [Serializer] () mutable
 		{
+			Serializer.Reset();
 			TRACE_END_REGION(RegionName);
+			UE_LOG(LogSaveGameSubsystem, Log, TEXT("%s: End"), RegionName);
 		}, Previous));
 	});
 }
 
 void USaveGameSubsystem::Load()
 {
+	constexpr TCHAR RegionName[] = TEXT("SaveGame[Load]");
+	UE_LOG(LogSaveGameSubsystem, Log, TEXT("%s: Begin"), RegionName);
+	TRACE_BEGIN_REGION(RegionName);
+
 	TSharedPtr<TSaveGameSerializer<true>> Serializer = MakeShared<TSaveGameSerializer<true>>(this);
 
 	SaveGamePipe.Launch(UE_SOURCE_LOCATION, [this, Serializer]
 	{
-		constexpr TCHAR RegionName[] = TEXT("SaveGame[Load]");
-		TRACE_BEGIN_REGION(RegionName);
-
 		FTask Previous = Serializer->DoOperation();
 
 		// This will also keep the Serializer alive until we're complete
-		AddNested(Launch(UE_SOURCE_LOCATION, [Serializer]
+		AddNested(Launch(UE_SOURCE_LOCATION, [Serializer] () mutable
 		{
+			Serializer.Reset();
 			TRACE_END_REGION(RegionName);
+			UE_LOG(LogSaveGameSubsystem, Log, TEXT("%s: End"), RegionName);
 		}, Previous));
 	});
 }

@@ -21,5 +21,5 @@ public:
 	FSaveGameTheadScope();
 	~FSaveGameTheadScope();
 
-	void ProcessThread() const;
+	bool ProcessThread() const;
 };
