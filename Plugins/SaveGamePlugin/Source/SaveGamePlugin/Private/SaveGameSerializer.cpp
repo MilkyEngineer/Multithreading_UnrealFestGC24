@@ -11,7 +11,7 @@
 #include "TaskHelpers.inl"
 #include "Formatters/NullArchiveFormatter.h"
 
-constexpr bool bForceSingleThreaded = true;
+constexpr bool bForceSingleThreaded = false;
 #define USE_TEXT_FORMATTER WITH_TEXT_ARCHIVE_SUPPORT
 
 #if USE_TEXT_FORMATTER
