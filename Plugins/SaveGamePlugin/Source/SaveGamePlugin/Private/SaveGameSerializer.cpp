@@ -247,7 +247,7 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 					MapLoadEvent.Trigger();
 
 					const signed int RemovedCount = FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
-                    check(RemovedCount == 1);
+					check(RemovedCount == 1);
 				});
 
 				World->SeamlessTravel(MapName, true);
@@ -286,10 +286,10 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 			TArray<FTask, TFixedAllocator<1 + USE_TEXT_FORMATTER>> FinishEvents;
 
 #if USE_TEXT_FORMATTER
-  			FinishEvents.Add(Launch(UE_SOURCE_LOCATION, [this, SaveSystem]
+			FinishEvents.Add(Launch(UE_SOURCE_LOCATION, [this, SaveSystem]
 			{
 				TArray<uint8> JsonData;
-  				FMemoryWriter WriterArchive(JsonData);
+				FMemoryWriter WriterArchive(JsonData);
 				TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer = TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&WriterArchive);
 				FJsonSerializer::Serialize(reinterpret_cast<FSaveGameArchiveFormatter&>(SaveArchive->Formatter).JsonFormatter.GetRoot(), Writer);
 
@@ -365,28 +365,27 @@ void TSaveGameSerializer<bIsLoading>::SerializeHeader()
 	Record << SA_VALUE(TEXT("Map"), MapName);
 }
 
-void ExecuteJobs(const int32 NumJobs, TFunction<void(int32)> Job)
+template<typename FuncType>
+void ExecuteJobs(const int32 NumJobs, TStatId StatId, FuncType&& Job)
 {
-	FTaskConcurrencyLimiter ConcurrencyLimiter(FTaskGraphInterface::Get().GetNumWorkerThreads(), ETaskPriority::BackgroundNormal);
 	FSaveGameTheadScope GameThreadScope;
-	TAtomic<uint32> CompletedJobs = 0;
+	TAtomic<int32> JobIdx = 0;
+	TAtomic<int32> CompletedJobs = 0;
 
-	for (int32 ActorIdx = 0; ActorIdx < NumJobs; ++ActorIdx)
+	const int32 NumThreads = GThreadPool->GetNumThreads();
+	for (int32 ThreadIdx = 0; ThreadIdx < NumThreads; ++ThreadIdx)
 	{
-		auto DoJob = [ActorIdx, &CompletedJobs, &Job](uint32)
+		GThreadPool->AddQueuedWork(new TAsyncQueuedWork<void>([&]
 		{
-			Job(ActorIdx);
-			++CompletedJobs;
-		};
+			FScopeCycleCounter Counter(StatId);
 
-		if (bForceSingleThreaded)
-		{
-			DoJob(ActorIdx);
-		}
-		else
-		{
-			ConcurrencyLimiter.Push(UE_SOURCE_LOCATION, DoJob);
-		}
+			int32 OurJobIdx;
+			while ((OurJobIdx = JobIdx.IncrementExchange()) < NumJobs)
+			{
+				Job(OurJobIdx);
+				++CompletedJobs;
+			}
+		}, TPromise<void>()), EQueuedWorkPriority::Highest);
 	}
 
 	if (!bForceSingleThreaded)
@@ -394,11 +393,10 @@ void ExecuteJobs(const int32 NumJobs, TFunction<void(int32)> Job)
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
 
 		// Pump the Work Queue on the game thread
-		while (GameThreadScope.ProcessThread() || CompletedJobs.Load() != NumJobs)
-		{
-			FPlatformProcess::YieldCycles(10000);
-		}
+		while (GameThreadScope.ProcessThread(10000) || CompletedJobs.Load() < NumJobs);
 	}
+
+	check(CompletedJobs.Load() >= NumJobs);
 }
 
 template<bool bIsLoading>
@@ -452,14 +450,14 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_InitializeActors);
 
-		ExecuteJobs(NumActors, [this] (int32 ActorIdx) { InitializeActor(ActorIdx); });
+		ExecuteJobs(NumActors, GET_STATID(STAT_SaveGame_InitializeActors), [this] (int32 ActorIdx) { InitializeActor(ActorIdx); });
 	}
 
 	// Actually do the serialization of each actor (now that we've updated redirects)
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_Serialize);
 
-		ExecuteJobs(NumActors, [this] (int32 ActorIdx) { SerializeActor(ActorIdx); });
+		ExecuteJobs(NumActors, GET_STATID(STAT_SaveGame_Serialize), [this] (int32 ActorIdx) { SerializeActor(ActorIdx); });
 	}
 
 	if (bIsLoading)

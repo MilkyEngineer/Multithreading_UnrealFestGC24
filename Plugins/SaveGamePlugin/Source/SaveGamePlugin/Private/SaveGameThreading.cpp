@@ -7,31 +7,47 @@ class FSaveGameThreadQueue final : public ISaveGameThreadQueue
 public:
 	FSaveGameThreadQueue()
 		: ThreadId(FPlatformTLS::GetCurrentThreadId())
+		, Event(FPlatformProcess::GetSynchEventFromPool(true))
 	{}
 
 	virtual ~FSaveGameThreadQueue() override
 	{
 		check(ThreadId == FPlatformTLS::GetCurrentThreadId());
 		check(IsComplete());
+
+		FPlatformProcess::ReturnSynchEventToPool(Event);
+		Event = nullptr;
 	}
 
 	virtual void AddTask(TFunction<void()>&& Task) override
 	{
 		WorkQueue.Push(new FTaskFunction(Task));
+		Event->Trigger();
 	}
 
-	bool ProcessThread()
+	bool ProcessThread(int64 WaitCycles)
 	{
 		check(ThreadId == FPlatformTLS::GetCurrentThreadId());
-
 		bool bDidWork = false;
+		bool bTriggered;
 
-		while (const FTaskFunction* Function = WorkQueue.Pop())
+		do
 		{
-			(*Function)();
-			delete Function;
-			bDidWork = true;
-		}
+			{
+				QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_ProcessThreadQueue);
+
+				while (const FTaskFunction* Function = WorkQueue.Pop())
+				{
+					(*Function)();
+					delete Function;
+					bDidWork = true;
+				}
+			}
+
+			QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_WaitThreadQueue);
+			Event->Reset();
+			bTriggered = Event->Wait(FTimespan(WaitCycles));
+		} while (bTriggered || !IsComplete());
 
 		return bDidWork;
 	}
@@ -41,6 +57,7 @@ public:
 private:
 	const uint32 ThreadId;
 	TLockFreePointerListFIFO<FTaskFunction, PLATFORM_CACHE_LINE_SIZE> WorkQueue;
+	FEvent* Event;
 };
 
 static TSharedPtr<FSaveGameThreadQueue> GSaveGameThreadQueue;
@@ -63,7 +80,7 @@ FSaveGameTheadScope::~FSaveGameTheadScope()
 	GSaveGameThreadQueue.Reset();
 }
 
-bool FSaveGameTheadScope::ProcessThread() const
+bool FSaveGameTheadScope::ProcessThread(int64 WaitCycles) const
 {
-	return GSaveGameThreadQueue->ProcessThread();
+	return GSaveGameThreadQueue->ProcessThread(WaitCycles);
 }
