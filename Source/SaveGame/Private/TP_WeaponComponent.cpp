@@ -103,6 +103,8 @@ void UTP_WeaponComponent::AttachWeapon(ASaveGameCharacter* TargetCharacter)
 
 void UTP_WeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	Super::EndPlay(EndPlayReason);
+
 	if (Character == nullptr)
 	{
 		return;
