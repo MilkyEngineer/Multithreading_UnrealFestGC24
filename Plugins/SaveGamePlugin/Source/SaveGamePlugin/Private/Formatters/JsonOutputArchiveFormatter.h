@@ -50,6 +50,7 @@ public:
 	virtual void Serialize(float& Value) override;
 	virtual void Serialize(double& Value) override;
 	virtual void Serialize(bool& Value) override;
+	virtual void Serialize(UTF32CHAR& Value) override;
 	virtual void Serialize(FString& Value) override;
 	virtual void Serialize(FName& Value) override;
 	virtual void Serialize(UObject*& Value) override;
@@ -72,7 +73,7 @@ private:
 			, bInAttributedValueValue(false)
 			, bInStream(false)
 		{}
-		
+
 		TSharedRef<FJsonObject> Object;
 		FString Field;
 
@@ -85,13 +86,13 @@ private:
 	TArray<FStackObject> Stack;
 
 	void Serialize(const UObject* Value);
-	
+
 	template<typename ValueType>
 	void SetNumberValue(const ValueType& Value);
 
 	template<typename JsonValueType, typename ValueType>
 	void SetValue(const ValueType& Value);
-	
+
 	void SetValue(const TSharedRef<FJsonValue>& Value);
 
 	FStackObject& GetCurrent() { return Stack.Last(); }

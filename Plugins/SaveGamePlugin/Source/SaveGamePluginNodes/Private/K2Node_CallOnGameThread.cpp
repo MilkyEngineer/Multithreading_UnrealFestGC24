@@ -10,6 +10,7 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_CreateDelegate.h"
 #include "KismetCompiler.h"
+#include "ObjectTools.h"
 #include "ToolMenu.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
@@ -124,7 +125,7 @@ void UK2Node_CallOnGameThread::GetMenuActions(FBlueprintActionDatabaseRegistrar&
 		static void SetUISpec(const FBlueprintActionContext& /*Context*/, const IBlueprintNodeBinder::FBindingSet& Bindings, FBlueprintActionUiSpec* UiSpecOut, TWeakObjectPtr<UFunction> FunctionPtr)
 		{
 			const UFunction* Function = FunctionPtr.Get();
-			UiSpecOut->MenuName = GetUserFacingFunctionName(Function);
+			UiSpecOut->MenuName = ObjectTools::GetUserFacingFunctionName(Function);
 			UiSpecOut->Category = CreateCategory(Function);
 		}
 	};

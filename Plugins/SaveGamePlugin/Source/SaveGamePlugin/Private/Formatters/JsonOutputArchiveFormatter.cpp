@@ -38,7 +38,7 @@ void FJsonOutputArchiveFormatter::EnterRecord()
 
 void FJsonOutputArchiveFormatter::LeaveRecord()
 {
-	Stack.Pop(false);
+	Stack.Pop(EAllowShrinking::No);
 }
 
 void FJsonOutputArchiveFormatter::EnterField(FArchiveFieldName Name)
@@ -217,6 +217,11 @@ void FJsonOutputArchiveFormatter::Serialize(double& Value)
 void FJsonOutputArchiveFormatter::Serialize(bool& Value)
 {
 	SetNumberValue(Value);
+}
+
+void FJsonOutputArchiveFormatter::Serialize(UTF32CHAR& Value)
+{
+	SetValue<FJsonValueString>(LexToString(*(uint32*)&Value));
 }
 
 void FJsonOutputArchiveFormatter::Serialize(FString& Value)

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#if WITH_TEXT_ARCHIVE_SUPPORT
 #include "Serialization/StructuredArchiveFormatter.h"
 
 class FProxyArchiveFormatter : public FStructuredArchiveFormatter
@@ -46,6 +47,7 @@ public:
 	virtual void Serialize(float& Value) override;
 	virtual void Serialize(double& Value) override;
 	virtual void Serialize(bool& Value) override;
+	virtual void Serialize(UTF32CHAR& Value) override;
 	virtual void Serialize(FString& Value) override;
 	virtual void Serialize(FName& Value) override;
 	virtual void Serialize(UObject*& Value) override;
@@ -63,3 +65,4 @@ protected:
 	FStructuredArchiveFormatter& Primary;
 	FStructuredArchiveFormatter* Secondary;
 };
+#endif

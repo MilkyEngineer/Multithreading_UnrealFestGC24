@@ -1,5 +1,6 @@
 // Copyright Alex Stevens (@MilkyEngineer). All Rights Reserved.
 
+#if WITH_TEXT_ARCHIVE_SUPPORT
 #include "ProxyArchiveFormatter.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogProxyArchiveFormatter, Log, All);
@@ -308,6 +309,14 @@ void FProxyArchiveFormatter::Serialize(bool& Value)
 	UE_LOG(LogProxyArchiveFormatter, Verbose, TEXT("%llu: %s%hs Bool %i"), GetUnderlyingArchive().Tell(), *Tabber(StackDepth), __FUNCSIG__, Value);
 }
 
+void FProxyArchiveFormatter::Serialize(UTF32CHAR& Value)
+{
+	Primary.Serialize(Value);
+	Secondary->Serialize(Value);
+
+	UE_LOG(LogProxyArchiveFormatter, Verbose, TEXT("%llu: %s%hs UTF32CHAR %c"), GetUnderlyingArchive().Tell(), *Tabber(StackDepth), __FUNCSIG__, Value);
+}
+
 void FProxyArchiveFormatter::Serialize(FString& Value)
 {
 	Primary.Serialize(Value);
@@ -395,3 +404,4 @@ void FProxyArchiveFormatter::Serialize(void* Data, uint64 DataSize)
 
 	UE_LOG(LogProxyArchiveFormatter, Verbose, TEXT("%llu: %s%hs Data %llu bytes"), GetUnderlyingArchive().Tell(), *Tabber(StackDepth), __FUNCSIG__, DataSize);
 }
+#endif

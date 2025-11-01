@@ -9,7 +9,6 @@
 #include "SaveGameVersion.h"
 #include "SaveGameProxyArchive.h"
 #include "TaskHelpers.inl"
-#include "Formatters/NullArchiveFormatter.h"
 
 constexpr bool bForceSingleThreaded = false;
 #define USE_TEXT_FORMATTER WITH_TEXT_ARCHIVE_SUPPORT
@@ -17,6 +16,7 @@ constexpr bool bForceSingleThreaded = false;
 #if USE_TEXT_FORMATTER
 #include "Formatters/JsonOutputArchiveFormatter.h"
 #include "Formatters/ProxyArchiveFormatter.h"
+#include "Formatters/NullArchiveFormatter.h"
 #endif
 
 #include "SaveGameSystem.h"
@@ -47,13 +47,16 @@ public:
 template<bool bIsLoading>
 class TSaveGameArchive
 {
-	using FSaveGameFormatter =
-		typename TChooseClass<USE_TEXT_FORMATTER, class FSaveGameArchiveFormatter, FBinaryArchiveFormatter>::Result;
+	typedef std::conditional_t<USE_TEXT_FORMATTER, class FSaveGameArchiveFormatter, FBinaryArchiveFormatter> FSaveGameFormatter;
 
 public:
 	TSaveGameArchive(FArchive& InArchive, TMap<FSoftObjectPath, FSoftObjectPath>& InRedirects)
 		: ProxyArchive(InArchive, InRedirects)
+#if USE_TEXT_FORMATTER
 		, Formatter(ProxyArchive, bIsLoading)
+#else
+		, Formatter(ProxyArchive)
+#endif
 		, ArchiveData(nullptr)
 	{}
 
@@ -112,7 +115,7 @@ public:
 private:
 	struct FStructuredArchiveData
 	{
-		FStructuredArchiveData(FStructuredArchiveFormatter& InFormatter)
+		FStructuredArchiveData(FSaveGameFormatter& InFormatter)
 			: StructuredArchive(InFormatter)
 			, RootSlot(StructuredArchive.Open())
 			, RootRecord(RootSlot.EnterRecord())
@@ -409,6 +412,15 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 
 	// This serialize method assumes that we don't have any streamed/sub levels
 	const UWorld* World = Subsystem->GetWorld();
+	ensureAlwaysMsgf(!World->IsPartitionedWorld(), TEXT("World Partition isn't supported by this save game system!"));
+	if (World->IsPartitionedWorld())
+	{
+		FMessageDialog::Open(
+			EAppMsgCategory::Warning,
+			EAppMsgType::Ok,
+			NSLOCTEXT(UE_MODULE_NAME, "WorldPartition_Warning", "Save Game System doesn't support World Partition!"));
+	}
+
 	LevelAssetPath = FTopLevelAssetPath(World->GetCurrentLevel()->GetPackage()->GetFName(), World->GetCurrentLevel()->GetOuter()->GetFName());
 
 	SaveGameActors = Subsystem->SaveGameActors.Array();

@@ -56,6 +56,7 @@ public:
 	virtual void Serialize(float& Value) override {}
 	virtual void Serialize(double& Value) override {}
 	virtual void Serialize(bool& Value) override {}
+	virtual void Serialize(UTF32CHAR& Value) override {}
 	virtual void Serialize(FString& Value) override {}
 	virtual void Serialize(FName& Value) override {}
 	virtual void Serialize(UObject*& Value) override {}
