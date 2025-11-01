@@ -24,8 +24,15 @@ void FJsonOutputArchiveFormatter::EnterRecord()
 	{
 		FStackObject& Current = GetCurrent();
 
-		check(!Current.Field.IsEmpty());
-		Current.Object->SetObjectField(Current.Field, Object);
+		if (Current.bInStream)
+		{
+			Current.StreamValues.Add(MakeShared<FJsonValueObject>(Object));
+		}
+		else
+		{
+			check(!Current.Field.IsEmpty());
+			Current.Object->SetObjectField(Current.Field, Object);
+		}
 	}
 	else
 	{
