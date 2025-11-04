@@ -20,6 +20,8 @@ public class SaveGamePlugin : ModuleRules
 			"DeveloperSettings",
 			"AtomicQueue",
 			"Json",
+			"Slate",
+			"SlateCore",
 		});
 
 		if (Target.Type == TargetType.Editor)

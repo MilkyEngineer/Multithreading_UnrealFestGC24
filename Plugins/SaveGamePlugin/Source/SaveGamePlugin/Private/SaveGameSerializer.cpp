@@ -352,14 +352,6 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 
 	// This serialize method assumes that we don't have any streamed/sub levels
 	const UWorld* World = Subsystem->GetWorld();
-	if (false && !ensureAlwaysMsgf(!World->IsPartitionedWorld(), TEXT("World Partition isn't supported by this save game system!")))
-	{
-		FMessageDialog::Open(
-			EAppMsgCategory::Warning,
-			EAppMsgType::Ok,
-			NSLOCTEXT(UE_MODULE_NAME, "WorldPartition_Warning", "Save Game System doesn't support World Partition!"));
-	}
-
 	LevelAssetPath = FTopLevelAssetPath(World->GetCurrentLevel()->GetPackage()->GetFName(), World->GetCurrentLevel()->GetOuter()->GetFName());
 
 	SaveGameActors = Subsystem->SaveGameActors.Array();
