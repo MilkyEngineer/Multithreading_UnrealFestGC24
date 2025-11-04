@@ -133,8 +133,8 @@ public:
 	 * @param bIsLoading true if loading a save game, false if saving
 	 * @return Not used, but necessary to not turn this method into an event (useful for SerializeItem and local vars)
 	 */
-	UFUNCTION(BlueprintNativeEvent, Category=SaveGame)
-	bool OnSerialize(UPARAM(ref) FSaveGameArchive& Archive, bool bIsLoading);
+	UFUNCTION(BlueprintNativeEvent, Category=SaveGame, meta=(ForceAsFunction))
+	void OnSerialize(UPARAM(ref) FSaveGameArchive& Archive, bool bIsLoading);
 
 	/**
 	 * Returns true when the programmer is confident that the OnSerialize event is thread-safe.
