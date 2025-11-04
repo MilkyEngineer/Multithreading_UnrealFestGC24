@@ -22,7 +22,6 @@ constexpr bool bForceSingleThreaded = false;
 #include "SaveGameSystem.h"
 #include "PlatformFeatures.h"
 #include "SaveGameSubsystem.h"
-#include "SaveGameThreading.h"
 #include "Tasks/TaskConcurrencyLimiter.h"
 
 #define LEVEL_SUBPATH_PREFIX TEXT("PersistentLevel.")
@@ -235,36 +234,11 @@ FTask TSaveGameSerializer<bIsLoading>::DoOperation()
 		if (bIsLoading)
 		{
 			PreviousTask = Launch(UE_SOURCE_LOCATION, [this] { SerializeVersions(); }, PreviousTask);
-
-			FTaskEvent MapLoadEvent(TEXT("MapLoaded"));
-			LaunchGameThread(UE_SOURCE_LOCATION, [this, MapLoadEvent]() mutable
-			{
-				UWorld* World = Subsystem->GetWorld();
-
-				check(!MapName.IsEmpty());
-				check(!World->IsInSeamlessTravel());
-
-				// When our map has loaded, continue the serialization process
-				FCoreUObjectDelegates::PostLoadMapWithWorld.AddSPLambda(this, [this, MapLoadEvent](UWorld*) mutable
-				{
-					MapLoadEvent.Trigger();
-
-					const signed int RemovedCount = FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
-					check(RemovedCount == 1);
-				});
-
-				World->SeamlessTravel(MapName, true);
-			}, PreviousTask);
-
-			// Our next task should wait for the map to be loaded
-			PreviousTask = MapLoadEvent;
+			PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this] { TravelToMap(); }, PreviousTask);
 		}
 
-		PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this]
-		{
-			SerializeDestroyedActors();
-			SerializeActors();
-		}, PreviousTask);
+		PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this] { SerializeDestroyedActors(); }, PreviousTask);
+		PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this] { SerializeActors(); }, PreviousTask);
 
 		if (!bIsLoading)
 		{
@@ -368,40 +342,6 @@ void TSaveGameSerializer<bIsLoading>::SerializeHeader()
 	Record << SA_VALUE(TEXT("Map"), MapName);
 }
 
-template<typename FuncType>
-void ExecuteJobs(const int32 NumJobs, TStatId StatId, FuncType&& Job)
-{
-	FSaveGameTheadScope GameThreadScope;
-	TAtomic<int32> JobIdx = 0;
-	TAtomic<int32> CompletedJobs = 0;
-
-	const int32 NumThreads = GThreadPool->GetNumThreads();
-	for (int32 ThreadIdx = 0; ThreadIdx < NumThreads; ++ThreadIdx)
-	{
-		GThreadPool->AddQueuedWork(new TAsyncQueuedWork<void>([&]
-		{
-			FScopeCycleCounter Counter(StatId);
-
-			int32 OurJobIdx;
-			while ((OurJobIdx = JobIdx.IncrementExchange()) < NumJobs)
-			{
-				Job(OurJobIdx);
-				++CompletedJobs;
-			}
-		}, TPromise<void>()), EQueuedWorkPriority::Highest);
-	}
-
-	if (!bForceSingleThreaded)
-	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_PumpGameThread);
-
-		// Pump the Work Queue on the game thread
-		while (GameThreadScope.ProcessThread(10000) || CompletedJobs.Load() < NumJobs);
-	}
-
-	check(CompletedJobs.Load() >= NumJobs);
-}
-
 template<bool bIsLoading>
 void TSaveGameSerializer<bIsLoading>::SerializeActors()
 {
@@ -412,8 +352,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 
 	// This serialize method assumes that we don't have any streamed/sub levels
 	const UWorld* World = Subsystem->GetWorld();
-	ensureAlwaysMsgf(!World->IsPartitionedWorld(), TEXT("World Partition isn't supported by this save game system!"));
-	if (World->IsPartitionedWorld())
+	if (false && !ensureAlwaysMsgf(!World->IsPartitionedWorld(), TEXT("World Partition isn't supported by this save game system!")))
 	{
 		FMessageDialog::Open(
 			EAppMsgCategory::Warning,
@@ -458,27 +397,60 @@ void TSaveGameSerializer<bIsLoading>::SerializeActors()
 	ActorsOffset = Archive.Tell();
 	FStructuredArchive::FStream ActorStream = SaveArchive->GetRecord().EnterStream(TEXT("Actors"));
 
+	FTask PreviousTask;
+	TArray<FTask> Tasks;
+
 	// Need to init actors first for the sake of populating redirects before serialization
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_InitializeActors);
+		Tasks.Reset(NumActors);
 
-		ExecuteJobs(NumActors, GET_STATID(STAT_SaveGame_InitializeActors), [this] (int32 ActorIdx) { InitializeActor(ActorIdx); });
+		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
+		{
+			Tasks.Add(Launch(UE_SOURCE_LOCATION, [this, ActorIdx]{ InitializeActor(ActorIdx); }));
+		}
+
+		PreviousTask = Launch(UE_SOURCE_LOCATION, [this]
+		{
+			// We want to update the redirectors here before actually serializing
+			// This is also so we are threadsafe in adding new redirects
+			for (FActorInfo& ActorInfo : ActorData)
+			{
+				check(ActorInfo.Actor.IsValid());
+
+				const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
+
+				// We potentially have a spawned actor that other actors reference
+				// If the name has changed, be sure to redirect the old actor path to the new one
+				ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(ActorInfo.Actor.Get()));
+			}
+		}, Tasks);
 	}
 
 	// Actually do the serialization of each actor (now that we've updated redirects)
 	{
-		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_Serialize);
+		Tasks.Reset(NumActors);
 
-		ExecuteJobs(NumActors, GET_STATID(STAT_SaveGame_Serialize), [this] (int32 ActorIdx) { SerializeActor(ActorIdx); });
+		for (int32 ActorIdx = 0; ActorIdx < NumActors; ++ActorIdx)
+		{
+			Tasks.Add(Launch(UE_SOURCE_LOCATION, [this, ActorIdx]{ SerializeActor(ActorIdx); }, PreviousTask));
+		}
+
+		PreviousTask = Launch(UE_SOURCE_LOCATION,[] {}, Tasks);
 	}
 
 	if (bIsLoading)
 	{
-		for (FActorInfo& ActorInfo : ActorData)
+		PreviousTask = Launch(UE_SOURCE_LOCATION, [this]
 		{
-			ActorInfo.Archive->Close();
-		}
+			// Close all of our archives... we're done serializing
+			for (FActorInfo& ActorInfo : ActorData)
+			{
+				ActorInfo.Archive->Close();
+			}
+		}, PreviousTask);
 	}
+
+	AddNested(PreviousTask);
 }
 
 template <bool bIsLoading>
@@ -539,27 +511,32 @@ void TSaveGameSerializer<bIsLoading>::InitializeActor(int32 ActorIdx)
 
 	if (bIsLoading)
 	{
-		ISaveGameThreadQueue::FTaskFunction SpawnOrGetActor = [this, ActorIdx, Class, SpawnID]
+		UWorld* World = Subsystem->GetWorld();
+
+		if (Class.IsNull())
 		{
-			UWorld* World = Subsystem->GetWorld();
-			FActorInfo& ActorInfo = ActorData[ActorIdx];
-			TWeakObjectPtr<AActor>& Actor = ActorInfo.Actor;
+			ensureAlways(!ActorInfo.Name.IsEmpty());
 
-			if (Class.IsNull())
-			{
-				ensureAlways(!ActorInfo.Name.IsEmpty());
+			// This is a loaded actor (is a level actor), let's find it
+			ActorInfo.Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
+		}
+		else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
+		{
+			ActorInfo.Actor = SpawnIDs[SpawnID];
+		}
+		else
+		{
+			TSharedPtr<FTaskEvent> ClassLoadEvent = MakeShared<FTaskEvent>(TEXT("ActorClassLoad"));
 
-				// This is a loaded actor (is a level actor), let's find it
-				Actor = FindObjectFast<AActor>(World->GetCurrentLevel(), *ActorInfo.Name);
-			}
-			else if (SpawnID.IsValid() && SpawnIDs.Contains(SpawnID))
+			Class.LoadAsync(FLoadSoftObjectPathAsyncDelegate::CreateLambda([ClassLoadEvent](const FSoftObjectPath& Class, UObject*)
 			{
-				Actor = SpawnIDs[SpawnID];
-			}
-			else
-			{
-				UClass* ActorClass = Class.TryLoadClass<AActor>();
+				ClassLoadEvent->Trigger();
+			}));
 
+			FTask PreviousTask = LaunchGameThread(UE_SOURCE_LOCATION, [this, ActorIdx, Class, SpawnID, World]
+			{
+				FActorInfo& ActorInfo = ActorData[ActorIdx];
+				UClass* ActorClass = Class.ResolveClass();
 				ensureAlways(!ActorInfo.Name.IsEmpty());
 				ensureAlways(ActorClass);
 
@@ -571,34 +548,16 @@ void TSaveGameSerializer<bIsLoading>::InitializeActor(int32 ActorIdx)
 				SpawnParameters.Name = *ActorInfo.Name;
 				SpawnParameters.bNoFail = true;
 
-				Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
+				ActorInfo.Actor = World->SpawnActor(ActorClass, nullptr, nullptr, SpawnParameters);
 
-				if (SpawnID.IsValid() && Actor->Implements<USaveGameSpawnActor>())
+				if (SpawnID.IsValid() && ActorInfo.Actor->Implements<USaveGameSpawnActor>())
 				{
-					ISaveGameSpawnActor::Execute_SetSpawnID(Actor.Get(), SpawnID);
+					ISaveGameSpawnActor::Execute_SetSpawnID(ActorInfo.Actor.Get(), SpawnID);
 				}
-			}
 
-			check(Actor.IsValid());
-			SaveGameActors[ActorIdx] = Actor;
+			}, *ClassLoadEvent, ETaskPriority::Inherit);
 
-			if (SpawnID.IsValid())
-			{
-				const FString ActorSubPath = LEVEL_SUBPATH_PREFIX + ActorInfo.Name;
-
-				// We potentially have a spawned actor that other actors reference
-				// If the name has changed, be sure to redirect the old actor path to the new one
-				ActorInfo.Archive->GetArchive().AddRedirect(FSoftObjectPath(LevelAssetPath, ActorSubPath), FSoftObjectPath(Actor.Get()));
-			}
-		};
-
-		if (bForceSingleThreaded)
-		{
-			SpawnOrGetActor();
-		}
-		else
-		{
-			ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(SpawnOrGetActor));
+			AddNested(PreviousTask);
 		}
 	}
 }
@@ -617,7 +576,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeActor(int32 ActorIdx)
 	// Since we have control of the game thread, we should be pretty safe to serialize our properties
 	Actor->SerializeScriptProperties(Record.EnterField(TEXT("Properties")));
 
-	ISaveGameThreadQueue::FTaskFunction CallOnSerialize = [this, ActorIdx]
+	TFunction<void()> CallOnSerialize = [this, ActorIdx]
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_OnSerialize);
 
@@ -639,8 +598,7 @@ void TSaveGameSerializer<bIsLoading>::SerializeActor(int32 ActorIdx)
 	}
 	else
 	{
-		// We're not threadsafe, queue up this actor to the game thread
-		ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(CallOnSerialize));
+		AddNested(LaunchGameThread(UE_SOURCE_LOCATION, Forward<TFunction<void()>>(CallOnSerialize), ETaskPriority::Inherit));
 	}
 }
 
@@ -738,6 +696,37 @@ void TSaveGameSerializer<bIsLoading>::SerializeDestroyedActors()
 			}
 		}
 	}
+}
+
+template <bool bIsLoading>
+void TSaveGameSerializer<bIsLoading>::TravelToMap()
+{
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_TravelToMap);
+
+	UWorld* World = Subsystem->GetWorld();
+	check(!MapName.IsEmpty());
+	check(!World->IsInSeamlessTravel());
+
+	TSharedPtr<FTaskEvent> TaskEvent = MakeShared<FTaskEvent>(TEXT("MapLoaded"));
+
+#if WITH_EDITOR
+	if (GIsEditor && GEditor)
+	{
+		// NOTE: Fixes a UE crash due to BP recompile and selected actors
+		GEditor->SelectNone(false, true);
+	}
+#endif
+
+	// When our map has loaded, continue the serialization process
+	FCoreUObjectDelegates::PostLoadMapWithWorld.AddSPLambda(this, [this, TaskEvent](UWorld* NewWorld) mutable
+	{
+		// Ensure that our new world is being used for the serialisation
+		TaskEvent->Trigger();
+		FCoreUObjectDelegates::PostLoadMapWithWorld.RemoveAll(this);
+	});
+
+	World->SeamlessTravel(MapName, true);
+	AddNested(*TaskEvent);
 }
 
 template <bool bIsLoading>

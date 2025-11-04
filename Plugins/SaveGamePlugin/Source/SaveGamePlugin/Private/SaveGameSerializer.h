@@ -77,6 +77,7 @@ private:
 
 	/** Serializes any destroyed level actors. On load, level actors will exist again, so this will re-destroy them */
 	void SerializeDestroyedActors();
+	void TravelToMap();
 
 	/**
 	 * Serialized at the end of the archive, the versions are useful for marshaling old data.

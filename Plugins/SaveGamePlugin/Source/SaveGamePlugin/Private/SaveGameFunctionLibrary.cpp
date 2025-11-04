@@ -3,7 +3,9 @@
 #include "SaveGameFunctionLibrary.h"
 
 #include "SaveGameSettings.h"
-#include "SaveGameThreading.h"
+#include "TaskHelpers.inl"
+
+using namespace UE::Tasks;
 
 #if WITH_EDITOR
 #include "Blueprint/BlueprintExceptionInfo.h"
@@ -77,7 +79,7 @@ bool USaveGameFunctionLibrary::SerializeActorTransform(FSaveGameArchive& Archive
 
 			if (bIsLoading && bIsMovable)
 			{
-				auto SetActorTransform = [Actor = TWeakObjectPtr<AActor>(Actor), ActorTransform]
+				TFunction<void()> SetActorTransform = [Actor = TWeakObjectPtr<AActor>(Actor), ActorTransform]
 				{
 					QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_SetActorTransform);
 
@@ -95,7 +97,7 @@ bool USaveGameFunctionLibrary::SerializeActorTransform(FSaveGameArchive& Archive
 				}
 				else
 				{
-					ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(SetActorTransform));
+					AddNested(LaunchGameThread(UE_SOURCE_LOCATION, Forward<TFunction<void()>>(SetActorTransform), ETaskPriority::Inherit));
 				}
 			}
 		});
@@ -202,7 +204,7 @@ DEFINE_FUNCTION(USaveGameFunctionLibrary::execCallOnGameThread)
 	P_FINISH;
 
 	P_NATIVE_BEGIN;
-	auto ProcessDelegate = [Delegate, Data]
+	TFunction<void()> ProcessDelegate = [Delegate, Data]
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(STAT_SaveGame_CallOnGameThread_ThreadTask);
 
@@ -221,7 +223,7 @@ DEFINE_FUNCTION(USaveGameFunctionLibrary::execCallOnGameThread)
 	}
 	else
 	{
-		ISaveGameThreadQueue::Get().AddTask(Forward<ISaveGameThreadQueue::FTaskFunction>(ProcessDelegate));
+		AddNested(LaunchGameThread(UE_SOURCE_LOCATION, Forward<TFunction<void()>>(ProcessDelegate), ETaskPriority::Inherit));
 	}
 
 	P_NATIVE_END;
